@@ -101,6 +101,42 @@ fn journal_reopens_from_the_workspace_runtime_directory() {
 }
 
 #[test]
+fn apply_publishes_one_complete_generation_and_preserves_the_prior_bytes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let prior_repo = workspace.repo_dir().to_path_buf();
+    let prior = std::fs::read(prior_repo.join("src/lib.rs")).expect("prior bytes");
+    assert_eq!(workspace.generation(), 0);
+    let mut repo = real_repo(workspace, ATTEMPT);
+    let auth = good_auth();
+
+    repo.apply_change(
+        &auth,
+        &[patch("src/lib.rs", "pub fn generation_one() {}\n")],
+    )
+    .expect("publish generation");
+    assert_eq!(repo.workspace().generation(), 1);
+    assert_ne!(repo.workspace().repo_dir(), prior_repo);
+    assert_eq!(
+        std::fs::read(prior_repo.join("src/lib.rs")).expect("immutable prior"),
+        prior
+    );
+    let expected = repo.checkpoint(&auth).expect("exact checkpoint");
+    let expected_ops = repo.journal_ops().to_vec();
+    let workspace = repo.into_workspace();
+
+    let mut reopened = real_repo(workspace, ATTEMPT);
+    assert_eq!(reopened.workspace().generation(), 1);
+    assert_eq!(reopened.journal_ops(), expected_ops);
+    assert_eq!(reopened.checkpoint(&auth).expect("reopened"), expected);
+    assert_eq!(
+        std::fs::read(reopened.workspace().repo_dir().join("src/lib.rs")).expect("complete next"),
+        b"pub fn generation_one() {}\n"
+    );
+}
+
+#[test]
 fn cas_publication_before_tree_mutation_recovers_the_prior_checkpoint() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (src, base) = init_source(tmp.path());
@@ -170,8 +206,8 @@ fn journal_append_failure_restores_the_applied_file_batch() {
     let before = std::fs::read(&target).expect("read before-state");
     let occupied = repo
         .workspace()
-        .runtime_dir()
-        .join("journal/00000000000000000001-00000000000000000001.json");
+        .journal_dir()
+        .join("00000000000000000001-00000000000000000001.json");
     std::fs::write(&occupied, b"occupied").expect("occupy next batch name");
 
     let error = repo
@@ -187,10 +223,10 @@ fn oversized_preimage_is_refused_before_tree_or_journal_mutation() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (src, base) = init_source(tmp.path());
     let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
-    let target = workspace.repo_dir().join("src/lib.rs");
+    let mut repo = real_repo(workspace, ATTEMPT);
+    let target = repo.workspace().repo_dir().join("src/lib.rs");
     let oversized = vec![b'x'; MAX_CAS_OBJECT_BYTES + 1];
     std::fs::write(&target, &oversized).expect("oversized preimage fixture");
-    let mut repo = real_repo(workspace, ATTEMPT);
 
     let error = repo
         .apply_change(&good_auth(), &[patch("src/lib.rs", "replacement\n")])
@@ -376,7 +412,11 @@ fn delete_of_tracked_file_lands_in_candidate_and_journal() {
     let before = std::fs::read(&target).expect("before bytes");
     repo.apply_change(&auth, &[PatchHunk::delete("src/lib.rs")])
         .expect("delete");
-    assert!(!target.exists(), "file removed from the working tree");
+    assert!(target.exists(), "prior generation remains immutable");
+    assert!(
+        !repo.workspace().repo_dir().join("src/lib.rs").exists(),
+        "file removed from the active generation"
+    );
     let op = repo.journal_ops().last().expect("journal op");
     assert_eq!(op.kind, JournalOpKind::Delete);
     assert_eq!(op.before, Some(cas_digest(&before)), "before-state object");
@@ -435,12 +475,12 @@ fn worktree_shaped_directory_is_refused() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (src, base) = init_source(tmp.path());
     let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let mut repo = real_repo(workspace, ATTEMPT);
     // A worktree is a directory whose .git is a FILE containing `gitdir: ...`.
-    let dot_git = workspace.repo_dir().join(".git");
-    let hidden = workspace.repo_dir().join(".git-moved");
+    let dot_git = repo.workspace().repo_dir().join(".git");
+    let hidden = repo.workspace().repo_dir().join(".git-moved");
     std::fs::rename(&dot_git, &hidden).expect("move .git aside");
     std::fs::write(&dot_git, format!("gitdir: {}\n", hidden.display())).expect("gitdir file");
-    let mut repo = real_repo(workspace, ATTEMPT);
     let auth = good_auth();
     let err = repo
         .apply_change(&auth, &[patch("src/lib.rs", "x")])
@@ -471,8 +511,8 @@ fn unclassified_untracked_file_outside_scope_blocks_prepare() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (src, base) = init_source(tmp.path());
     let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
-    std::fs::write(workspace.repo_dir().join("stray.bin"), b"noise").expect("stray");
     let mut repo = real_repo(workspace, ATTEMPT);
+    std::fs::write(repo.workspace().repo_dir().join("stray.bin"), b"noise").expect("stray");
     let auth = good_auth();
     let err = repo
         .prepare_candidate(&auth, &change())
@@ -508,11 +548,14 @@ fn symlink_write_is_refused() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (src, base) = init_source(tmp.path());
     let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let mut repo = real_repo(workspace, ATTEMPT);
     let outside = tmp.path().join("outside");
     std::fs::create_dir_all(&outside).expect("outside");
-    std::os::unix::fs::symlink(&outside, workspace.repo_dir().join("src").join("link"))
-        .expect("symlink");
-    let mut repo = real_repo(workspace, ATTEMPT);
+    std::os::unix::fs::symlink(
+        &outside,
+        repo.workspace().repo_dir().join("src").join("link"),
+    )
+    .expect("symlink");
     let auth = good_auth();
     let err = repo
         .apply_change(&auth, &[patch("src/link", "overwrite")])

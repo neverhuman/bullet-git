@@ -1,8 +1,10 @@
 //! Private clone creation (spec §20.2) and receipt-gated cleanup (spec §20.8).
 
+use crate::generation::{GenerationBootstrap, GenerationStore, StagedGeneration};
 use crate::mirror::sync_mirror;
 use crate::safe_git::{FileProtocol, HeadState, SafeGit};
 use crate::{io_err, CapabilityError};
+use bullet_git_journal::{Checkpoint, DurableJournal};
 use bullet_git_types::GitOid;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -64,7 +66,7 @@ pub struct PreservationReceipt {
 /// A private writable clone with no remote and no credential path.
 #[derive(Debug)]
 pub struct PrivateClone {
-    repo_dir: PathBuf,
+    generations: GenerationStore,
     runtime_dir: PathBuf,
     manifest: WorkspaceManifest,
     nonce: [u8; 32],
@@ -101,9 +103,12 @@ impl PrivateClone {
         if !base_exists {
             return Err(CapabilityError::BaseMissing(base.as_str().to_string()));
         }
-        let repo_dir = req.root.join("work").join(req.attempt_id).join("repo");
-        fs::create_dir_all(repo_dir.parent().unwrap_or(&repo_dir))
-            .map_err(|err| io_err("create work dir", &err))?;
+        let work_root = req.root.join("work");
+        prepare_private_directory(&work_root)?;
+        let work_dir = work_root.join(req.attempt_id);
+        prepare_private_directory(&work_dir)?;
+        let bootstrap = GenerationBootstrap::prepare(&work_dir)?;
+        let repo_dir = bootstrap.repo_dir();
         let source = req.source_repo.to_string_lossy().into_owned();
         let mirror_str = mirror.dir.to_string_lossy().into_owned();
         let dest = repo_dir.to_string_lossy().into_owned();
@@ -118,13 +123,25 @@ impl PrivateClone {
         guard_repository(&git, &repo_dir)?;
         let branch = format!("bullet/{}/{}", req.variant_id, req.attempt_id);
         checkout_private_branch(&git, &repo_dir, &base, &branch)?;
+        let journal = DurableJournal::open(bootstrap.journal_dir())?;
+        let base_tree = git
+            .run(
+                Some(&repo_dir),
+                FileProtocol::Never,
+                &["rev-parse", "HEAD^{tree}"],
+                &[],
+            )?
+            .text();
+        let initial_checkpoint = journal.checkpoint().bind_git_tree(GitOid::new(base_tree)?);
+        let nonce_hex = hex::encode(req.nonce);
+        let generations = bootstrap.finish(req.attempt_id, &nonce_hex, initial_checkpoint)?;
         let manifest = WorkspaceManifest {
             attempt_id: req.attempt_id.to_string(),
             variant_id: req.variant_id.to_string(),
             base_sha: base.as_str().to_string(),
             branch,
             created_at: req.created_at.to_string(),
-            nonce_hex: hex::encode(req.nonce),
+            nonce_hex,
             source_repo: source,
             mirror_dir: mirror_str,
             repo_dir: dest,
@@ -134,7 +151,7 @@ impl PrivateClone {
         fs::write(runtime_dir.join("manifest.json"), manifest_json)
             .map_err(|err| io_err("write manifest", &err))?;
         Ok(Self {
-            repo_dir,
+            generations,
             runtime_dir,
             manifest,
             nonce: req.nonce,
@@ -145,7 +162,21 @@ impl PrivateClone {
     /// The private clone directory.
     #[must_use]
     pub fn repo_dir(&self) -> &Path {
-        &self.repo_dir
+        // The store owns this stable path until the next successful switch.
+        // Keeping the path inside the store prevents a second source of truth.
+        self.generations.repo_dir_ref()
+    }
+
+    /// Durable journal directory of the active generation.
+    #[must_use]
+    pub fn journal_dir(&self) -> PathBuf {
+        self.generations.journal_dir()
+    }
+
+    /// Active immutable generation number.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generations.generation()
     }
 
     /// The per-workspace runtime directory (manifest, isolation dirs).
@@ -178,6 +209,33 @@ impl PrivateClone {
         &self.git
     }
 
+    pub(crate) fn reopen_generation(&mut self) -> Result<(), CapabilityError> {
+        self.generations = GenerationStore::open(
+            self.generations.work_dir(),
+            &self.manifest.attempt_id,
+            &self.manifest.nonce_hex,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn stage_generation(&self) -> Result<StagedGeneration, CapabilityError> {
+        self.generations.stage().map_err(Into::into)
+    }
+
+    pub(crate) fn publish_generation(
+        &mut self,
+        stage: StagedGeneration,
+        checkpoint: Checkpoint,
+    ) -> Result<(), CapabilityError> {
+        self.generations
+            .publish(stage, checkpoint)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn generation_checkpoint(&self) -> &Checkpoint {
+        self.generations.checkpoint()
+    }
+
     /// Write and verify a preservation bundle for cleanup.
     ///
     /// # Errors
@@ -186,13 +244,13 @@ impl PrivateClone {
     pub fn preserve(&self, bundle_path: &Path) -> Result<PreservationReceipt, CapabilityError> {
         let bundle = bundle_path.to_string_lossy().into_owned();
         self.git.run(
-            Some(&self.repo_dir),
+            Some(self.repo_dir()),
             FileProtocol::Never,
             &["bundle", "create", &bundle, "--all"],
             &[],
         )?;
         self.git.run(
-            Some(&self.repo_dir),
+            Some(self.repo_dir()),
             FileProtocol::Never,
             &["bundle", "verify", &bundle],
             &[],
@@ -227,14 +285,14 @@ impl PrivateClone {
         let bundle = receipt.bundle_path.to_string_lossy().into_owned();
         self.git
             .run(
-                Some(&self.repo_dir),
+                Some(self.repo_dir()),
                 FileProtocol::Never,
                 &["bundle", "verify", &bundle],
                 &[],
             )
             .map_err(|err| CapabilityError::CleanupReceiptRequired(err.to_string()))?;
-        let attempt_dir = self.repo_dir.parent().unwrap_or(&self.repo_dir);
-        fs::remove_dir_all(attempt_dir).map_err(|err| io_err("delete workspace", &err))?;
+        fs::remove_dir_all(self.generations.work_dir())
+            .map_err(|err| io_err("delete workspace", &err))?;
         let tombstone = serde_json::json!({
             "attempt_id": self.manifest.attempt_id,
             "variant_id": self.manifest.variant_id,

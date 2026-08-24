@@ -8,6 +8,9 @@ mod apply;
 mod cas;
 mod clone;
 mod fsync;
+mod generation;
+#[cfg(test)]
+mod generation_tests;
 mod git_config;
 mod mirror;
 mod patch;
@@ -15,9 +18,11 @@ mod repository;
 mod safe_git;
 mod scope;
 mod status;
+mod tree_copy;
 
 pub use cas::{cas_digest, CasError, CasPut, ImmutableCas, PutDisposition, MAX_CAS_OBJECT_BYTES};
 pub use clone::{CloneRequest, PreservationReceipt, PrivateClone, WorkspaceManifest};
+pub use generation::GenerationError;
 pub use mirror::{mirror_dir, MirrorLock, LOCK_MAX_WAIT, LOCK_STALE_AFTER};
 pub use patch::{validate_batch, PatchHunk, PatchOp, MAX_CONTENT_BYTES, MAX_PATCH_OPERATIONS};
 pub use repository::{AgentRepository, CommitIdentity, ExpectedAuthority, RealRepository};
@@ -115,6 +120,9 @@ pub enum CapabilityError {
     /// Immutable content storage failed or has an indeterminate publication.
     #[error(transparent)]
     ContentStore(#[from] CasError),
+    /// Immutable workspace generation failed or has an indeterminate switch.
+    #[error(transparent)]
+    Generation(#[from] GenerationError),
     /// Repository-local Git configuration could execute code or redirect truth.
     #[error("hostile repository-local git config: {0}")]
     HostileGitConfig(String),
@@ -152,6 +160,7 @@ impl CapabilityError {
             Self::Git(_) => "GIT_FAILED",
             Self::Journal(_) => "JOURNAL_FAILED",
             Self::ContentStore(error) => error.reason_code(),
+            Self::Generation(error) => error.reason_code(),
             Self::HostileGitConfig(_) => "HOSTILE_GIT_CONFIG",
             Self::Io(_) => "IO_FAILED",
             Self::Types(_) => "INVALID_TYPES",

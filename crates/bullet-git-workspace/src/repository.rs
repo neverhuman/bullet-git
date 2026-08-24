@@ -1,8 +1,8 @@
 //! The capability API and its real-Git implementation.
 
-use crate::apply::{apply_all, restore_all};
 use crate::cas::{CasError, ImmutableCas};
-use crate::clone::{guard_repository, sequencer_check, PrivateClone};
+use crate::clone::{guard_repository, PrivateClone};
+use crate::generation::{GenerationError, StagedGeneration};
 use crate::patch::{validate_batch, PatchHunk, PatchOp};
 use crate::safe_git::{FileProtocol, HeadState};
 use crate::scope::ScopeGrant;
@@ -12,8 +12,13 @@ use bullet_git_journal::{Checkpoint, DurableJournal, JournalMutation};
 use bullet_git_types::{
     AuthorityEnvelope, Candidate, CandidateId, Change, Digest, GitOid, WireAuthorityToken,
 };
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs::{self, File};
+use std::path::Path;
+
+#[path = "repository_ops.rs"]
+mod ops;
 
 /// Agent-facing repository capability.
 pub trait AgentRepository {
@@ -24,8 +29,8 @@ pub trait AgentRepository {
     /// Returns `UNAUTHORIZED`/`STALE_AUTHORITY` on a bad token.
     fn read_tree(&self, auth: &AuthorityEnvelope) -> Result<Vec<String>, CapabilityError>;
 
-    /// Apply a scoped patch set. Validation is all-or-nothing; writes are
-    /// snapshot-rollback atomic so a later IO error restores the prior tree.
+    /// Apply a scoped patch set. Validation is all-or-nothing; a complete
+    /// staged generation becomes active through one durable pointer switch.
     ///
     /// # Errors
     ///
@@ -123,29 +128,36 @@ pub struct RealRepository {
     identity: CommitIdentity,
     journal: DurableJournal,
     cas: ImmutableCas,
-    checkpoint_count: u64,
+    checkpoint_count: Cell<u64>,
+    healthy: bool,
 }
 
 impl RealRepository {
     /// Bind a private clone to a scope grant and expected authority.
     pub fn new(
-        workspace: PrivateClone,
+        mut workspace: PrivateClone,
         grant: ScopeGrant,
         expected: ExpectedAuthority,
         identity: CommitIdentity,
     ) -> Result<Self, CapabilityError> {
-        let journal = DurableJournal::open(workspace.runtime_dir().join("journal"))?;
+        workspace.reopen_generation()?;
+        let journal = DurableJournal::open(workspace.journal_dir())?;
         let cas = open_workspace_cas(workspace.runtime_dir())?;
         validate_journal_objects(&journal, &cas)?;
-        Ok(Self {
+        let repository = Self {
             workspace,
             grant,
             expected,
             identity,
             journal,
             cas,
-            checkpoint_count: 0,
-        })
+            checkpoint_count: Cell::new(0),
+            healthy: true,
+        };
+        repository.guard()?;
+        repository.require_private_branch()?;
+        repository.validate_active_checkpoint()?;
+        Ok(repository)
     }
 
     /// Borrow the underlying workspace.
@@ -168,6 +180,17 @@ impl RealRepository {
 
     fn guard(&self) -> Result<(), CapabilityError> {
         guard_repository(self.workspace.git(), self.workspace.repo_dir())
+    }
+
+    fn require_healthy(&self) -> Result<(), CapabilityError> {
+        if self.healthy {
+            Ok(())
+        } else {
+            Err(GenerationError::OutcomeUnknown(
+                "writer must reopen after an indeterminate generation switch".into(),
+            )
+            .into())
+        }
     }
 
     fn symlink_check(&self, normalized: &str) -> Result<(), CapabilityError> {
@@ -277,31 +300,45 @@ impl RealRepository {
             .collect()
     }
 
-    fn write_tree_checkpoint(&mut self) -> Result<Checkpoint, CapabilityError> {
-        self.checkpoint_count += 1;
+    fn write_tree_checkpoint(
+        &self,
+        repo: &Path,
+        journal: &DurableJournal,
+    ) -> Result<Checkpoint, CapabilityError> {
+        let checkpoint_count = self
+            .checkpoint_count
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| GenerationError::Corrupt("checkpoint counter overflow".into()))?;
+        self.checkpoint_count.set(checkpoint_count);
         let index_path = self
             .workspace
             .runtime_dir()
-            .join(format!("tmp-index-{}", self.checkpoint_count));
+            .join(format!("generation-index-{checkpoint_count}"));
         let env = [("GIT_INDEX_FILE", OsString::from(&index_path))];
-        let repo = self.workspace.repo_dir().to_path_buf();
         let git = self.workspace.git();
-        git.run(
-            Some(&repo),
-            FileProtocol::Never,
-            &["read-tree", "HEAD"],
-            &env,
-        )?;
-        git.run(Some(&repo), FileProtocol::Never, &["add", "-A"], &env)?;
-        let tree = git
-            .run(Some(&repo), FileProtocol::Never, &["write-tree"], &env)?
-            .text();
+        let result = (|| {
+            git.run(
+                Some(repo),
+                FileProtocol::Never,
+                &["read-tree", "HEAD"],
+                &env,
+            )?;
+            git.run(Some(repo), FileProtocol::Never, &["add", "-A"], &env)?;
+            let tree = git
+                .run(Some(repo), FileProtocol::Never, &["write-tree"], &env)?
+                .text();
+            Ok(journal.checkpoint().bind_git_tree(GitOid::new(tree)?))
+        })();
         let _ = fs::remove_file(&index_path);
-        Ok(self.journal.checkpoint().bind_git_tree(GitOid::new(tree)?))
+        result
     }
 
-    fn commit_candidate(&self, change: &Change) -> Result<(GitOid, GitOid), CapabilityError> {
-        let repo = self.workspace.repo_dir();
+    fn commit_candidate(
+        &self,
+        repo: &Path,
+        change: &Change,
+    ) -> Result<(GitOid, GitOid), CapabilityError> {
         let git = self.workspace.git();
         let env = self.identity.env();
         git.run(Some(repo), FileProtocol::Never, &["add", "-A"], &[])?;
@@ -339,93 +376,49 @@ impl RealRepository {
             }),
         }
     }
-}
 
-impl AgentRepository for RealRepository {
-    fn read_tree(&self, auth: &AuthorityEnvelope) -> Result<Vec<String>, CapabilityError> {
-        self.expected.require(auth)?;
-        let out = self.workspace.git().run(
-            Some(self.workspace.repo_dir()),
-            FileProtocol::Never,
-            &["ls-files"],
-            &[],
-        )?;
-        Ok(String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect())
+    fn validate_active_checkpoint(&self) -> Result<Checkpoint, CapabilityError> {
+        let checkpoint = self.write_tree_checkpoint(self.workspace.repo_dir(), &self.journal)?;
+        if &checkpoint != self.workspace.generation_checkpoint() {
+            return Err(GenerationError::Corrupt(
+                "active repository or journal does not match its generation manifest".into(),
+            )
+            .into());
+        }
+        Ok(checkpoint)
     }
 
-    fn apply_change(
+    fn publish_stage(
         &mut self,
-        auth: &AuthorityEnvelope,
-        patches: &[PatchHunk],
+        stage: StagedGeneration,
+        checkpoint: Checkpoint,
     ) -> Result<(), CapabilityError> {
-        self.expected.require(auth)?;
-        self.guard()?;
-        let normalized = self.validate_patches(patches)?;
-        let mutations = self.prepare_journal_mutations(patches, &normalized)?;
-        let mut undo = Vec::new();
-        let applied = apply_all(self.workspace.repo_dir(), patches, &normalized, &mut undo);
-        if let Err(err) = applied {
-            restore_all(&undo);
-            return Err(err);
-        }
-        if let Err(error) = self.journal.record_batch(&mutations) {
-            if !error.may_have_published() {
-                restore_all(&undo);
+        if let Err(error) = self.workspace.publish_generation(stage, checkpoint) {
+            if matches!(&error, CapabilityError::Generation(inner) if inner.may_have_published()) {
+                self.healthy = false;
             }
-            return Err(error.into());
+            return Err(error);
         }
-        Ok(())
-    }
-
-    fn checkpoint(&mut self, auth: &AuthorityEnvelope) -> Result<Checkpoint, CapabilityError> {
-        self.expected.require(auth)?;
-        self.guard()?;
-        sequencer_check(self.workspace.repo_dir())?;
-        self.write_tree_checkpoint()
-    }
-
-    fn prepare_candidate(
-        &mut self,
-        auth: &AuthorityEnvelope,
-        change: &Change,
-    ) -> Result<Candidate, CapabilityError> {
-        self.expected.require(auth)?;
-        self.guard()?;
-        sequencer_check(self.workspace.repo_dir())?;
-        self.require_private_branch()?;
-        let entries = self.status_scan()?;
-        let actual_scope = self.classify_scan(&entries)?;
-        let _ = self.write_tree_checkpoint()?;
-        let (head, tree) = self.commit_candidate(change)?;
-        let base = GitOid::new(self.workspace.base_sha())?;
-        let range = format!("{base}..{head}");
-        let patch = self.workspace.git().run(
-            Some(self.workspace.repo_dir()),
-            FileProtocol::Never,
-            &["diff", &range],
-            &[],
-        )?;
-        let patch_hash = Digest::of(&patch.stdout);
-        let manifest = self.workspace.manifest();
-        Ok(Candidate {
-            id: CandidateId::from_content(&change.id, &tree, &head),
-            change: change.id.clone(),
-            base_commit: base,
-            head_commit: head,
-            tree_hash: tree,
-            patch_hash,
-            variant_id: manifest.variant_id.clone(),
-            attempt_id: manifest.attempt_id.clone(),
-            granted_scope: self.grant.allowed_prefixes.clone(),
-            actual_scope,
-            parent_candidate_id: None,
-            prepared_at: self.identity.date.clone(),
-            lineage_subject: None,
-            environment_digest: None,
-        })
+        match DurableJournal::open(self.workspace.journal_dir()) {
+            Ok(journal) => {
+                if let Err(error) = validate_journal_objects(&journal, &self.cas) {
+                    self.healthy = false;
+                    return Err(GenerationError::OutcomeUnknown(format!(
+                        "published generation CAS validation failed: {error}"
+                    ))
+                    .into());
+                }
+                self.journal = journal;
+                Ok(())
+            }
+            Err(error) => {
+                self.healthy = false;
+                Err(GenerationError::OutcomeUnknown(format!(
+                    "published generation journal did not reopen: {error}"
+                ))
+                .into())
+            }
+        }
     }
 }
 
