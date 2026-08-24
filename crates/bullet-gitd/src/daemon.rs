@@ -1,7 +1,9 @@
 //! Request dispatch. The daemon holds the expected attempt/fence/nonce from
 //! the initial `clone` token and verifies every subsequent call against them.
 
-use crate::protocol::{self, ApplyParams, CleanupParams, CloneParams, PrepareParams, Request};
+use crate::protocol::{
+    self, ApplyParams, CleanupParams, CloneParams, PatchParam, PrepareParams, Request,
+};
 use bullet_git_types::{AuthorityError, Change, ChangeId, Digest, WireAuthorityToken};
 use bullet_git_workspace::{
     AgentRepository, CapabilityError, CloneRequest, CommitIdentity, ExpectedAuthority, PatchHunk,
@@ -33,6 +35,37 @@ fn parse_params<T: DeserializeOwned>(params: &Value) -> Result<T, MethodError> {
 
 fn to_value<T: serde::Serialize>(value: &T) -> MethodResult {
     serde_json::to_value(value).map_err(|err| ("ENCODING".into(), format!("encode result: {err}")))
+}
+
+/// Decode one wire patch entry into a typed hunk.
+///
+/// `op` absent or `write` keeps the v1 shape and requires `contents_hex`;
+/// `delete` forbids it. Anything else is `BAD_REQUEST`.
+fn decode_patch(patch: PatchParam) -> Result<PatchHunk, MethodError> {
+    let bad = |message: String| ("BAD_REQUEST".to_string(), message);
+    match patch.op.as_deref() {
+        None | Some("write") => {
+            let Some(hex_text) = patch.contents_hex else {
+                return Err(bad(format!(
+                    "contents_hex required for write op: {}",
+                    patch.path
+                )));
+            };
+            let contents = hex::decode(&hex_text)
+                .map_err(|err| bad(format!("contents_hex for {}: {err}", patch.path)))?;
+            Ok(PatchHunk::write(patch.path, contents))
+        }
+        Some("delete") => {
+            if patch.contents_hex.is_some() {
+                return Err(bad(format!(
+                    "delete op must not carry contents_hex: {}",
+                    patch.path
+                )));
+            }
+            Ok(PatchHunk::delete(patch.path))
+        }
+        Some(other) => Err(bad(format!("unknown patch op {other:?}: {}", patch.path))),
+    }
 }
 
 struct Session {
@@ -148,16 +181,7 @@ impl Daemon {
                 let params: ApplyParams = parse_params(&req.params)?;
                 let mut patches = Vec::with_capacity(params.patches.len());
                 for patch in params.patches {
-                    let contents = hex::decode(&patch.contents_hex).map_err(|err| {
-                        (
-                            "BAD_REQUEST".into(),
-                            format!("contents_hex for {}: {err}", patch.path),
-                        )
-                    })?;
-                    patches.push(PatchHunk {
-                        path: patch.path,
-                        contents,
-                    });
+                    patches.push(decode_patch(patch)?);
                 }
                 session
                     .repo

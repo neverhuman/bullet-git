@@ -5,15 +5,17 @@
 //! steps; [`RealRepository`] implements the capability API over a real clone.
 
 mod clone;
+mod mirror;
+mod patch;
 mod repository;
 mod safe_git;
 mod scope;
 mod status;
 
 pub use clone::{CloneRequest, PreservationReceipt, PrivateClone, WorkspaceManifest};
-pub use repository::{
-    AgentRepository, CommitIdentity, ExpectedAuthority, PatchHunk, RealRepository,
-};
+pub use mirror::{mirror_dir, MirrorLock, LOCK_MAX_WAIT, LOCK_STALE_AFTER};
+pub use patch::{validate_batch, PatchHunk, PatchOp};
+pub use repository::{AgentRepository, CommitIdentity, ExpectedAuthority, RealRepository};
 pub use safe_git::{FileProtocol, GitOutput, HeadState, SafeGit};
 pub use scope::{normalize_rel_path, ScopeGrant};
 
@@ -32,6 +34,9 @@ pub enum CapabilityError {
     /// Path is outside the granted scope.
     #[error("path out of scope: {0}")]
     OutOfScope(String),
+    /// A delete patch targeted a path with no regular file behind it.
+    #[error("no regular file to delete at: {0}")]
+    PathAbsent(String),
     /// Path traverses or targets a symlink.
     #[error("symlink writes are forbidden: {0}")]
     SymlinkForbidden(String),
@@ -58,6 +63,9 @@ pub enum CapabilityError {
     /// Requested base SHA does not exist in the source repository.
     #[error("base sha not found in source: {0}")]
     BaseMissing(String),
+    /// The exclusive mirror lock could not be acquired within the bound.
+    #[error("mirror lock wait timed out: {0}")]
+    MirrorLockTimeout(String),
     /// Cleanup was requested with a nonce that does not match the manifest.
     #[error("cleanup nonce mismatch")]
     CleanupNonceMismatch,
@@ -83,6 +91,7 @@ impl CapabilityError {
             Self::Unauthorized(_) => "UNAUTHORIZED",
             Self::StaleAuthority(_) => "STALE_AUTHORITY",
             Self::OutOfScope(_) => "OUT_OF_SCOPE",
+            Self::PathAbsent(_) => "PATH_ABSENT",
             Self::SymlinkForbidden(_) => "SYMLINK_FORBIDDEN",
             Self::WorktreeForbidden(_) => "WORKTREE_FORBIDDEN",
             Self::WrongRepository(_) => "WRONG_REPOSITORY",
@@ -90,6 +99,7 @@ impl CapabilityError {
             Self::SequencerActive(_) => "SEQUENCER_ACTIVE",
             Self::UnclassifiedUntracked(_) => "UNCLASSIFIED_UNTRACKED",
             Self::BaseMissing(_) => "BASE_MISSING",
+            Self::MirrorLockTimeout(_) => "MIRROR_LOCK_TIMEOUT",
             Self::CleanupNonceMismatch => "CLEANUP_NONCE_MISMATCH",
             Self::CleanupReceiptRequired(_) => "CLEANUP_RECEIPT_REQUIRED",
             Self::Git(_) => "GIT_FAILED",

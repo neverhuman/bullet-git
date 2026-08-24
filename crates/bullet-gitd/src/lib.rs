@@ -10,7 +10,8 @@ use bullet_git_types::{
     EvolutionKind, GitOid, ProofRoot,
 };
 use bullet_git_workspace::{
-    AgentRepository, CapabilityError, ExpectedAuthority, PatchHunk, ScopeGrant,
+    validate_batch, AgentRepository, CapabilityError, ExpectedAuthority, PatchHunk, PatchOp,
+    ScopeGrant,
 };
 
 fn synth_oid(fields: &[&[u8]]) -> GitOid {
@@ -96,16 +97,25 @@ impl AgentRepository for MemoryRepository {
         if self.is_worktree {
             return Err(CapabilityError::WorktreeForbidden("memory".into()));
         }
-        let mut normalized = Vec::with_capacity(patches.len());
-        for patch in patches {
-            normalized.push(self.grant.check(&patch.path)?);
-        }
+        let normalized = validate_batch(&self.grant, patches, |path| {
+            self.files.iter().any(|(p, _)| p == path)
+        })?;
         for (patch, path) in patches.iter().zip(normalized) {
-            self.journal.record(&path, &patch.contents);
-            if let Some((_, existing)) = self.files.iter_mut().find(|(p, _)| p == &path) {
-                *existing = patch.contents.clone();
-            } else {
-                self.files.push((path, patch.contents.clone()));
+            match &patch.op {
+                PatchOp::Write(contents) => {
+                    self.journal.record(&path, contents);
+                    if let Some((_, existing)) = self.files.iter_mut().find(|(p, _)| p == &path) {
+                        *existing = contents.clone();
+                    } else {
+                        self.files.push((path, contents.clone()));
+                    }
+                }
+                PatchOp::Delete => {
+                    if let Some(pos) = self.files.iter().position(|(p, _)| p == &path) {
+                        let (_, before) = self.files.remove(pos);
+                        self.journal.record_delete(&path, &before);
+                    }
+                }
             }
         }
         Ok(())
@@ -222,10 +232,7 @@ mod tests {
         let err = repo
             .apply_change(
                 &token("atm_1", 3),
-                &[PatchHunk {
-                    path: "src/lib.rs".into(),
-                    contents: b"x".to_vec(),
-                }],
+                &[PatchHunk::write("src/lib.rs", b"x".to_vec())],
             )
             .expect_err("blocked");
         assert_eq!(err.reason_code(), "WORKTREE_FORBIDDEN");
@@ -239,14 +246,8 @@ mod tests {
             .apply_change(
                 &auth,
                 &[
-                    PatchHunk {
-                        path: "src/ok.rs".into(),
-                        contents: b"fine".to_vec(),
-                    },
-                    PatchHunk {
-                        path: "../escape".into(),
-                        contents: b"evil".to_vec(),
-                    },
+                    PatchHunk::write("src/ok.rs", b"fine".to_vec()),
+                    PatchHunk::write("../escape", b"evil".to_vec()),
                 ],
             )
             .expect_err("refused");
@@ -258,14 +259,8 @@ mod tests {
     #[test]
     fn candidate_id_ignores_application_order_but_tracks_content() {
         let auth = token("atm_1", 3);
-        let a = PatchHunk {
-            path: "src/a.rs".into(),
-            contents: b"alpha".to_vec(),
-        };
-        let b = PatchHunk {
-            path: "src/b.rs".into(),
-            contents: b"beta".to_vec(),
-        };
+        let a = PatchHunk::write("src/a.rs", b"alpha".to_vec());
+        let b = PatchHunk::write("src/b.rs", b"beta".to_vec());
         let mut one = MemoryRepository::new(expected(), grant());
         one.apply_change(&auth, &[a.clone(), b.clone()])
             .expect("apply");
@@ -280,14 +275,39 @@ mod tests {
         three
             .apply_change(
                 &auth,
-                &[PatchHunk {
-                    path: "src/a.rs".into(),
-                    contents: b"different".to_vec(),
-                }],
+                &[PatchHunk::write("src/a.rs", b"different".to_vec())],
             )
             .expect("apply");
         let c3 = three.prepare_candidate(&auth, &change()).expect("prepare");
         assert_ne!(c1.id, c3.id);
+    }
+
+    #[test]
+    fn delete_removes_the_file_and_absent_target_is_typed() {
+        let auth = token("atm_1", 3);
+        let mut repo = MemoryRepository::new(expected(), grant());
+        repo.apply_change(&auth, &[PatchHunk::write("src/lib.rs", b"x".to_vec())])
+            .expect("apply");
+        let err = repo
+            .apply_change(
+                &auth,
+                &[
+                    PatchHunk::write("src/other.rs", b"y".to_vec()),
+                    PatchHunk::delete("src/ghost.rs"),
+                ],
+            )
+            .expect_err("refused");
+        assert_eq!(err.reason_code(), "PATH_ABSENT");
+        assert_eq!(
+            repo.read_tree(&auth).expect("read"),
+            vec!["src/lib.rs".to_string()],
+            "failed batch must not mutate"
+        );
+        repo.apply_change(&auth, &[PatchHunk::delete("src/lib.rs")])
+            .expect("delete");
+        assert!(repo.read_tree(&auth).expect("read").is_empty());
+        let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
+        assert!(candidate.actual_scope.is_empty());
     }
 
     #[test]
@@ -296,10 +316,7 @@ mod tests {
         let mut repo = MemoryRepository::new(expected(), grant());
         repo.apply_change(
             &auth,
-            &[PatchHunk {
-                path: "src/lib.rs".into(),
-                contents: b"fn main() {}".to_vec(),
-            }],
+            &[PatchHunk::write("src/lib.rs", b"fn main() {}".to_vec())],
         )
         .expect("apply");
         let checkpoint = repo.checkpoint(&auth).expect("checkpoint");

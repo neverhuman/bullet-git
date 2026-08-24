@@ -17,10 +17,7 @@ fn change() -> Change {
 }
 
 fn patch(path: &str, contents: &str) -> PatchHunk {
-    PatchHunk {
-        path: path.into(),
-        contents: contents.as_bytes().to_vec(),
-    }
+    PatchHunk::write(path, contents.as_bytes().to_vec())
 }
 
 fn candidate_for(patches: &[PatchHunk], attempt: &str) -> Candidate {
@@ -156,6 +153,72 @@ fn hostile_hooks_and_home_config_never_execute() {
     let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
     assert_eq!(candidate.base_commit.as_str(), base);
     assert!(!canary.exists(), "a hostile hook executed");
+}
+
+#[test]
+fn delete_of_tracked_file_lands_in_candidate_and_journal() {
+    use bullet_git_journal::JournalOpKind;
+    use bullet_git_types::Digest as ContentDigest;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let mut repo = real_repo(workspace, ATTEMPT);
+    let auth = good_auth();
+    let target = repo.workspace().repo_dir().join("src/lib.rs");
+    let before = std::fs::read(&target).expect("before bytes");
+    repo.apply_change(&auth, &[PatchHunk::delete("src/lib.rs")])
+        .expect("delete");
+    assert!(!target.exists(), "file removed from the working tree");
+    let op = repo.journal_ops().last().expect("journal op");
+    assert_eq!(op.kind, JournalOpKind::Delete);
+    assert_eq!(op.digest, ContentDigest::of(&before), "before-state digest");
+    let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
+    assert!(candidate.actual_scope.contains(&"src/lib.rs".to_string()));
+    let listed = repo
+        .workspace()
+        .git()
+        .run(
+            Some(repo.workspace().repo_dir()),
+            FileProtocol::Never,
+            &["ls-tree", "-r", "--name-only", "HEAD"],
+            &[],
+        )
+        .expect("ls-tree")
+        .text();
+    assert!(
+        !listed.contains("src/lib.rs"),
+        "deleted file must not linger in the candidate tree: {listed}"
+    );
+    assert!(listed.contains("README.md"));
+}
+
+#[test]
+fn delete_of_absent_path_refuses_before_any_mutation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let mut repo = real_repo(workspace, ATTEMPT);
+    let auth = good_auth();
+    let err = repo
+        .apply_change(
+            &auth,
+            &[
+                patch("src/new.rs", "pub fn ok() {}\n"),
+                PatchHunk::delete("src/ghost.rs"),
+            ],
+        )
+        .expect_err("refused");
+    assert_eq!(err.reason_code(), "PATH_ABSENT");
+    assert!(err.to_string().contains("src/ghost.rs"));
+    assert!(
+        !repo.workspace().repo_dir().join("src/new.rs").exists(),
+        "failed batch must not write"
+    );
+    let err = repo
+        .apply_change(&auth, &[PatchHunk::delete("README.md")])
+        .expect_err("out of scope");
+    assert_eq!(err.reason_code(), "OUT_OF_SCOPE");
+    assert!(repo.workspace().repo_dir().join("README.md").exists());
 }
 
 #[test]

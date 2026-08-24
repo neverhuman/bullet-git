@@ -8,6 +8,7 @@ macro_rules! typed_id {
     ($name:ident, $prefix:literal) => {
         #[doc = concat!("Typed `", $prefix, "` identifier.")]
         #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
 
         impl $name {
@@ -47,6 +48,20 @@ macro_rules! typed_id {
         impl Display for $name {
             fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
                 f.write_str(&self.0)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = TypesError;
+
+            fn try_from(raw: String) -> Result<Self, Self::Error> {
+                Self::parse(raw)
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(id: $name) -> Self {
+                id.0
             }
         }
     };
@@ -128,6 +143,17 @@ impl Display for GitOid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_id_deserialization_is_validated() {
+        let id = ChangeId::from_seed("auth");
+        let json = serde_json::to_string(&id).expect("serialize");
+        let back: ChangeId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, id);
+        assert!(serde_json::from_str::<ChangeId>("\"nope\"").is_err());
+        let wrong_prefix = format!("\"chg_{}\"", "0".repeat(32));
+        assert!(serde_json::from_str::<CandidateId>(&wrong_prefix).is_err());
+    }
 
     #[test]
     fn parse_accepts_seeded_ids_and_rejects_malformed() {

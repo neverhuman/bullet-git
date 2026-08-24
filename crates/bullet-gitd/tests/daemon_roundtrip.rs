@@ -38,6 +38,8 @@ fn init_source(root: &Path) -> (String, String) {
     let src_str = src.to_string_lossy().into_owned();
     fixture_git(&home, &["init", "-q", "-b", "main", &src_str]);
     std::fs::write(src.join("README.md"), "seed\n").expect("seed");
+    std::fs::create_dir_all(src.join("src")).expect("src dir");
+    std::fs::write(src.join("src").join("seed.rs"), "pub fn seed() {}\n").expect("seed src");
     fixture_git(&home, &["-C", &src_str, "add", "-A"]);
     fixture_git(
         &home,
@@ -208,6 +210,48 @@ fn refused_tokens_and_scope(conv: &mut Conversation) {
         .contains("README.md"));
 }
 
+fn delete_flow(conv: &mut Conversation, root: &Path) {
+    let repo_dir = root.join("work").join(ATTEMPT).join("repo");
+    // Delete of a nonexistent path is typed; the whole batch applies nothing.
+    let resp = conv.send(&json!({
+        "id": 20, "method": "apply_change", "token": token(ATTEMPT, FENCE),
+        "params": {"patches": [
+            {"path": "src/extra.rs", "contents_hex": hex::encode("x")},
+            {"path": "src/ghost.rs", "op": "delete"}
+        ]}
+    }));
+    assert_eq!(resp["err"]["code"], "PATH_ABSENT");
+    assert!(resp["err"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("src/ghost.rs"));
+    assert!(
+        !repo_dir.join("src/extra.rs").exists(),
+        "failed batch must not write"
+    );
+
+    // Malformed delete entries are BAD_REQUEST before any mutation.
+    let resp = conv.send(&json!({
+        "id": 21, "method": "apply_change", "token": token(ATTEMPT, FENCE),
+        "params": {"patches": [{"path": "src/seed.rs", "op": "delete", "contents_hex": "00"}]}
+    }));
+    assert_eq!(resp["err"]["code"], "BAD_REQUEST");
+    let resp = conv.send(&json!({
+        "id": 22, "method": "apply_change", "token": token(ATTEMPT, FENCE),
+        "params": {"patches": [{"path": "src/seed.rs", "op": "defenestrate"}]}
+    }));
+    assert_eq!(resp["err"]["code"], "BAD_REQUEST");
+    assert!(repo_dir.join("src/seed.rs").exists(), "still untouched");
+
+    // A real delete of a tracked file applies.
+    let resp = conv.send(&json!({
+        "id": 23, "method": "apply_change", "token": token(ATTEMPT, FENCE),
+        "params": {"patches": [{"path": "src/seed.rs", "op": "delete"}]}
+    }));
+    assert_eq!(resp["ok"]["applied"], 1, "delete failed: {resp}");
+    assert!(!repo_dir.join("src/seed.rs").exists(), "file removed");
+}
+
 fn prepare_and_cleanup(conv: &mut Conversation, base: &str, root: &Path, bundle: &Path) {
     let resp = conv.send(&json!({
         "id": 9, "method": "prepare_candidate", "token": token(ATTEMPT, FENCE),
@@ -222,6 +266,23 @@ fn prepare_and_cleanup(conv: &mut Conversation, base: &str, root: &Path, bundle:
     assert_eq!(
         candidate["patch_hash"].as_str().expect("patch hash").len(),
         64
+    );
+    let scope = candidate["actual_scope"].as_array().expect("actual scope");
+    assert!(
+        scope.iter().any(|p| p == "src/seed.rs"),
+        "deletion lands in actual_scope: {resp}"
+    );
+    assert!(scope.iter().any(|p| p == "src/lib.rs"));
+
+    // The committed tree no longer tracks the deleted file.
+    let resp = conv.send(&json!({
+        "id": 12, "method": "read_tree", "token": token(ATTEMPT, FENCE), "params": {}
+    }));
+    let files = resp["ok"]["files"].as_array().expect("files");
+    assert!(files.iter().any(|f| f == "src/lib.rs"));
+    assert!(
+        !files.iter().any(|f| f == "src/seed.rs"),
+        "deleted file must not linger: {resp}"
     );
 
     // Cleanup without a preservation receipt is refused.
@@ -260,6 +321,7 @@ fn stdio_conversation_covers_the_full_lifecycle() {
     clone_and_read(&mut conv, &src, &base, &root);
     apply_and_checkpoint(&mut conv);
     refused_tokens_and_scope(&mut conv);
+    delete_flow(&mut conv, &root);
     prepare_and_cleanup(&mut conv, &base, &root, &bundle);
     assert!(!canary.exists(), "hostile hook executed inside the daemon");
     conv.finish();

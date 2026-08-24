@@ -1,6 +1,7 @@
 //! The capability API and its real-Git implementation.
 
 use crate::clone::{guard_repository, sequencer_check, PrivateClone};
+use crate::patch::{validate_batch, PatchHunk, PatchOp};
 use crate::safe_git::{FileProtocol, HeadState};
 use crate::scope::ScopeGrant;
 use crate::status::{parse_status_line, StatusEntry};
@@ -11,15 +12,6 @@ use bullet_git_types::{
 };
 use std::ffi::OsString;
 use std::fs;
-
-/// One file patch: full replacement contents for a repository-relative path.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PatchHunk {
-    /// Relative path.
-    pub path: String,
-    /// Replacement bytes.
-    pub contents: Vec<u8>,
-}
 
 /// Agent-facing repository capability.
 pub trait AgentRepository {
@@ -162,6 +154,12 @@ impl RealRepository {
         self.workspace
     }
 
+    /// Journal ops recorded so far (writes and deletions).
+    #[must_use]
+    pub fn journal_ops(&self) -> &[bullet_git_journal::JournalOp] {
+        self.journal.ops()
+    }
+
     fn guard(&self) -> Result<(), CapabilityError> {
         guard_repository(self.workspace.git(), self.workspace.repo_dir())
     }
@@ -182,11 +180,12 @@ impl RealRepository {
     }
 
     fn validate_patches(&self, patches: &[PatchHunk]) -> Result<Vec<String>, CapabilityError> {
-        let mut normalized = Vec::with_capacity(patches.len());
-        for patch in patches {
-            let path = self.grant.check(&patch.path)?;
-            self.symlink_check(&path)?;
-            normalized.push(path);
+        let repo_dir = self.workspace.repo_dir();
+        let normalized = validate_batch(&self.grant, patches, |path| {
+            fs::symlink_metadata(repo_dir.join(path)).is_ok_and(|meta| meta.is_file())
+        })?;
+        for path in &normalized {
+            self.symlink_check(path)?;
         }
         Ok(normalized)
     }
@@ -325,11 +324,22 @@ impl AgentRepository for RealRepository {
         let normalized = self.validate_patches(patches)?;
         for (patch, path) in patches.iter().zip(&normalized) {
             let target = self.workspace.repo_dir().join(path);
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).map_err(|err| io_err("create patch dir", &err))?;
+            match &patch.op {
+                PatchOp::Write(contents) => {
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|err| io_err("create patch dir", &err))?;
+                    }
+                    fs::write(&target, contents).map_err(|err| io_err("write patch", &err))?;
+                    self.journal.record(path, contents);
+                }
+                PatchOp::Delete => {
+                    let before =
+                        fs::read(&target).map_err(|err| io_err("read delete target", &err))?;
+                    fs::remove_file(&target).map_err(|err| io_err("delete patch target", &err))?;
+                    self.journal.record_delete(path, &before);
+                }
             }
-            fs::write(&target, &patch.contents).map_err(|err| io_err("write patch", &err))?;
-            self.journal.record(path, &patch.contents);
         }
         Ok(())
     }

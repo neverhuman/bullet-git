@@ -1,5 +1,6 @@
 //! Private clone creation (spec §20.2) and receipt-gated cleanup (spec §20.8).
 
+use crate::mirror::sync_mirror;
 use crate::safe_git::{FileProtocol, HeadState, SafeGit};
 use crate::{io_err, CapabilityError};
 use bullet_git_types::GitOid;
@@ -11,7 +12,8 @@ use std::path::{Path, PathBuf};
 /// the workspace layer stays deterministic and testable.
 #[derive(Debug)]
 pub struct CloneRequest<'a> {
-    /// Source repository (the mirror). Never contacted again after creation.
+    /// Source repository. Synced into a per-repository mirror under the
+    /// root; never contacted again after creation.
     pub source_repo: &'a Path,
     /// Exact base commit to check out.
     pub base_sha: &'a str,
@@ -44,6 +46,8 @@ pub struct WorkspaceManifest {
     pub nonce_hex: String,
     /// Source repository path at creation time.
     pub source_repo: String,
+    /// Bare mirror the workspace was cloned from.
+    pub mirror_dir: String,
     /// Private clone path.
     pub repo_dir: String,
 }
@@ -70,10 +74,12 @@ pub struct PrivateClone {
 impl PrivateClone {
     /// Create a private clone per spec §20.2.
     ///
-    /// Verify base exists → clone without checkout → remove the origin remote
-    /// (no remote survives: that is the no-credential/no-push guarantee) →
-    /// detached checkout of the exact base → create the private branch →
-    /// record the manifest in the runtime dir, never inside the repo tree.
+    /// Sync the per-repository mirror under the exclusive lock → verify base
+    /// exists in the mirror → clone from the mirror without checkout, with
+    /// objects shared then dissociated → remove the origin remote (no remote
+    /// survives: that is the no-credential/no-push guarantee) → detached
+    /// checkout of the exact base → create the private branch → record the
+    /// manifest in the runtime dir, never inside the repo tree.
     ///
     /// # Errors
     ///
@@ -84,9 +90,10 @@ impl PrivateClone {
         let runtime_dir = req.root.join("runtime").join(req.attempt_id);
         fs::create_dir_all(&runtime_dir).map_err(|err| io_err("create runtime dir", &err))?;
         let git = SafeGit::new(&runtime_dir)?;
+        let mirror = sync_mirror(&git, req.root, req.source_repo)?;
         let commitish = format!("{base}^{{commit}}");
         let base_exists = git.probe(
-            Some(req.source_repo),
+            Some(&mirror.dir),
             &["rev-parse", "--verify", "--quiet", &commitish],
         )?;
         if !base_exists {
@@ -96,13 +103,10 @@ impl PrivateClone {
         fs::create_dir_all(repo_dir.parent().unwrap_or(&repo_dir))
             .map_err(|err| io_err("create work dir", &err))?;
         let source = req.source_repo.to_string_lossy().into_owned();
+        let mirror_str = mirror.dir.to_string_lossy().into_owned();
         let dest = repo_dir.to_string_lossy().into_owned();
-        git.run(
-            None,
-            FileProtocol::User,
-            &["clone", "--no-checkout", &source, &dest],
-            &[],
-        )?;
+        clone_from_mirror(&git, &mirror_str, &dest)?;
+        mirror.release();
         git.run(
             Some(&repo_dir),
             FileProtocol::Never,
@@ -120,6 +124,7 @@ impl PrivateClone {
             created_at: req.created_at.to_string(),
             nonce_hex: hex::encode(req.nonce),
             source_repo: source,
+            mirror_dir: mirror_str,
             repo_dir: dest,
         };
         let manifest_json = serde_json::to_vec_pretty(&manifest)
@@ -239,6 +244,26 @@ impl PrivateClone {
         fs::write(&path, tombstone.to_string()).map_err(|err| io_err("write tombstone", &err))?;
         Ok(path)
     }
+}
+
+/// Clone from the mirror with objects shared then dissociated, so a later
+/// mirror GC can never corrupt the workspace and no alternates file survives.
+fn clone_from_mirror(git: &SafeGit, mirror: &str, dest: &str) -> Result<(), CapabilityError> {
+    git.run(
+        None,
+        FileProtocol::User,
+        &[
+            "clone",
+            "--no-checkout",
+            "--reference-if-able",
+            mirror,
+            "--dissociate",
+            mirror,
+            dest,
+        ],
+        &[],
+    )?;
+    Ok(())
 }
 
 /// Detached checkout of the exact base, then creation of the private branch.

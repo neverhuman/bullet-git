@@ -63,13 +63,21 @@ pub struct CloneParams {
     pub commit_date: String,
 }
 
-/// One patch in `apply_change`: full file contents, hex encoded.
+/// One patch in `apply_change`.
+///
+/// `op` selects the operation: `write` (the default when absent) replaces
+/// the full file contents from `contents_hex`; `delete` removes the file and
+/// must not carry `contents_hex`.
 #[derive(Debug, Deserialize)]
 pub struct PatchParam {
     /// Repository-relative path.
     pub path: String,
-    /// Hex encoding of the replacement bytes.
-    pub contents_hex: String,
+    /// `write` (default) or `delete`.
+    #[serde(default)]
+    pub op: Option<String>,
+    /// Hex encoding of the replacement bytes (write only).
+    #[serde(default)]
+    pub contents_hex: Option<String>,
 }
 
 /// `apply_change` parameters.
