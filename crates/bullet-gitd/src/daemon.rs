@@ -7,7 +7,7 @@ use crate::protocol::{
 use bullet_git_types::{AuthorityError, Change, ChangeId, Digest, WireAuthorityToken};
 use bullet_git_workspace::{
     AgentRepository, CapabilityError, CloneRequest, CommitIdentity, ExpectedAuthority, PatchHunk,
-    PrivateClone, RealRepository, ScopeGrant,
+    PrivateClone, RealRepository, ScopeGrant, MAX_CONTENT_BYTES,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -51,6 +51,12 @@ fn decode_patch(patch: PatchParam) -> Result<PatchHunk, MethodError> {
                     patch.path
                 )));
             };
+            if hex_text.len() > MAX_CONTENT_BYTES.saturating_mul(2) {
+                return Err((
+                    "CONTENT_TOO_LARGE".into(),
+                    format!("{} exceeds {MAX_CONTENT_BYTES} decoded bytes", patch.path),
+                ));
+            }
             let contents = hex::decode(&hex_text)
                 .map_err(|err| bad(format!("contents_hex for {}: {err}", patch.path)))?;
             Ok(PatchHunk::write(patch.path, contents))

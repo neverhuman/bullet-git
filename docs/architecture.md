@@ -93,6 +93,10 @@ tree.
   entries normalize to the same path (`DUPLICATE_PATH`) or fold to the same
   case-insensitive key (`PATH_COLLISION`); multi-step sequences on one path
   must be collapsed by the proposal producer.
+  Empty batches and batches above 1,024 operations fail with
+  `INVALID_OPERATION_COUNT`; a replacement body above 1 MiB fails with
+  `CONTENT_TOO_LARGE`. These values are identical to the frozen
+  `bullet-wire` proposal defaults.
 - **Deletes.** A patch entry may carry `"op": "delete"`. The target must
   be an existing regular file on disk when the batch is validated (else
   typed `PATH_ABSENT`), scope rules apply exactly as for writes, and the
@@ -127,7 +131,10 @@ tree.
 ## bullet-gitd stdio protocol
 
 Line-delimited JSON: one request object per line on stdin, one response
-object per line on stdout.
+object per line on stdout. Input is read through a bounded frame reader;
+frames above 4 MiB fail with `FRAME_TOO_LARGE` and terminate the session,
+invalid UTF-8 fails with `INVALID_UTF8`, and request/parameter objects reject
+unknown fields before dispatch.
 
 ```text
 request:  {"id": <any>, "method": <name>, "token": <AuthorityToken JSON>, "params": {...}}
@@ -167,12 +174,14 @@ Example conversation:
 ```
 
 Error codes: `UNAUTHORIZED`, `STALE_AUTHORITY`, `OUT_OF_SCOPE`,
-`PATH_ABSENT`, `DUPLICATE_PATH`, `PATH_COLLISION`, `SYMLINK_FORBIDDEN`,
+`PATH_ABSENT`, `DUPLICATE_PATH`, `PATH_COLLISION`, `INVALID_OPERATION_COUNT`,
+`CONTENT_TOO_LARGE`, `SYMLINK_FORBIDDEN`,
 `WORKTREE_FORBIDDEN`, `WRONG_REPOSITORY`, `WRONG_BRANCH`,
 `SEQUENCER_ACTIVE`, `UNCLASSIFIED_UNTRACKED`, `BASE_MISSING`,
 `MIRROR_LOCK_TIMEOUT`, `CLEANUP_NONCE_MISMATCH`, `CLEANUP_RECEIPT_REQUIRED`,
 `HOSTILE_GIT_CONFIG`, `GIT_FAILED`, `IO_FAILED`, `INVALID_TYPES`, plus protocol-level
-`BAD_REQUEST`, `NOT_CLONED`, `ALREADY_CLONED`, `UNKNOWN_METHOD`, `ENCODING`.
+`BAD_REQUEST`, `FRAME_TOO_LARGE`, `INVALID_UTF8`, `PROTOCOL_IO_FAILED`,
+`NOT_CLONED`, `ALREADY_CLONED`, `UNKNOWN_METHOD`, `ENCODING`.
 All v1 codes are unchanged; `PATH_ABSENT`, `DUPLICATE_PATH`,
 `PATH_COLLISION`, and `MIRROR_LOCK_TIMEOUT` are additive, as is the optional
 patch `op` field.

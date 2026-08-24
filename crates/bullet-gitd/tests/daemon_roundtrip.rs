@@ -1,6 +1,7 @@
 //! Full stdio conversation against the built bullet-gitd binary, spawned in a
 //! hostile environment (poisoned HOME, GIT_* variables) that it must ignore.
 
+use bullet_gitd::protocol::MAX_FRAME_BYTES;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -135,6 +136,12 @@ fn hostile_home(root: &Path, canary: &Path) -> std::path::PathBuf {
 }
 
 fn clone_and_read(conv: &mut Conversation, src: &str, base: &str, root: &Path) {
+    let resp = conv.send(&json!({
+        "id": -1, "method": "read_tree", "token": token(ATTEMPT, FENCE),
+        "params": {}, "unknown": true
+    }));
+    assert_eq!(resp["err"]["code"], "BAD_REQUEST");
+
     // Before clone, everything else is refused.
     let resp = conv.send(&json!({
         "id": 0, "method": "read_tree", "token": token(ATTEMPT, FENCE), "params": {}
@@ -208,6 +215,29 @@ fn refused_tokens_and_scope(conv: &mut Conversation) {
         .as_str()
         .expect("message")
         .contains("README.md"));
+}
+
+fn refused_admission_limits(conv: &mut Conversation) {
+    let resp = conv.send(&json!({
+        "id": 30, "method": "apply_change", "token": token(ATTEMPT, FENCE),
+        "params": {"patches": []}
+    }));
+    assert_eq!(resp["err"]["code"], "INVALID_OPERATION_COUNT");
+
+    let resp = conv.send(&json!({
+        "id": 31, "method": "apply_change", "token": token(ATTEMPT, FENCE),
+        "params": {"patches": [{
+            "path": "src/large.rs",
+            "contents_hex": "00".repeat(1_048_577)
+        }]}
+    }));
+    assert_eq!(resp["err"]["code"], "CONTENT_TOO_LARGE");
+
+    let resp = conv.send(&json!({
+        "id": 32, "method": "apply_change", "token": token(ATTEMPT, FENCE),
+        "params": {"patches": [], "unknown": true}
+    }));
+    assert_eq!(resp["err"]["code"], "BAD_REQUEST");
 }
 
 fn delete_flow(conv: &mut Conversation, root: &Path) {
@@ -321,8 +351,28 @@ fn stdio_conversation_covers_the_full_lifecycle() {
     clone_and_read(&mut conv, &src, &base, &root);
     apply_and_checkpoint(&mut conv);
     refused_tokens_and_scope(&mut conv);
+    refused_admission_limits(&mut conv);
     delete_flow(&mut conv, &root);
     prepare_and_cleanup(&mut conv, &base, &root, &bundle);
     assert!(!canary.exists(), "hostile hook executed inside the daemon");
+    conv.finish();
+}
+
+#[test]
+fn oversized_stdio_frame_is_refused_before_json_parsing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let canary = tmp.path().join("canary");
+    let home = hostile_home(tmp.path(), &canary);
+    let mut conv = spawn_daemon(&home);
+    conv.stdin
+        .write_all(&vec![b'x'; MAX_FRAME_BYTES + 1])
+        .expect("write oversized frame");
+    conv.stdin.write_all(b"\n").expect("write delimiter");
+    conv.stdin.flush().expect("flush frame");
+    let mut line = String::new();
+    conv.reader.read_line(&mut line).expect("read refusal");
+    let response: Value = serde_json::from_str(&line).expect("response json");
+    assert_eq!(response["id"], Value::Null);
+    assert_eq!(response["err"]["code"], "FRAME_TOO_LARGE");
     conv.finish();
 }

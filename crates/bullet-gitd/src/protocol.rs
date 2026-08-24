@@ -4,10 +4,76 @@
 use bullet_git_types::AuthorityEnvelope;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::io::BufRead;
+use thiserror::Error;
+
+/// Maximum bytes in one JSONL request, excluding the newline delimiter.
+pub const MAX_FRAME_BYTES: usize = 4 * 1_048_576;
+
+/// Bounded JSONL frame-read failure.
+#[derive(Debug, Error)]
+pub enum FrameReadError {
+    /// Reading stdin failed.
+    #[error("read protocol frame: {0}")]
+    Io(String),
+    /// A frame crossed the fixed input bound.
+    #[error("protocol frame exceeds {MAX_FRAME_BYTES} bytes")]
+    TooLarge,
+    /// JSONL protocol input must be UTF-8.
+    #[error("protocol frame is not valid UTF-8")]
+    InvalidUtf8,
+}
+
+impl FrameReadError {
+    /// Stable protocol reason code.
+    #[must_use]
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "PROTOCOL_IO_FAILED",
+            Self::TooLarge => "FRAME_TOO_LARGE",
+            Self::InvalidUtf8 => "INVALID_UTF8",
+        }
+    }
+}
+
+/// Read one bounded JSONL frame without allowing unbounded `read_line` growth.
+pub fn read_frame(reader: &mut impl BufRead) -> Result<Option<String>, FrameReadError> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader
+            .fill_buf()
+            .map_err(|error| FrameReadError::Io(error.to_string()))?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let payload_len = newline.unwrap_or(available.len());
+        let next_len = bytes
+            .len()
+            .checked_add(payload_len)
+            .ok_or(FrameReadError::TooLarge)?;
+        if next_len > MAX_FRAME_BYTES {
+            return Err(FrameReadError::TooLarge);
+        }
+        bytes.extend_from_slice(&available[..payload_len]);
+        let consumed = payload_len + usize::from(newline.is_some());
+        reader.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| FrameReadError::InvalidUtf8)
+}
 
 /// One request:
 /// `{"id": <any>, "method": <name>, "token": <AuthorityToken JSON>, "params": {...}}`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     /// Correlation id, echoed back verbatim.
     pub id: Value,
@@ -48,6 +114,7 @@ pub fn err_line(id: &Value, code: &str, message: &str) -> String {
 /// `clone` parameters. Variant, attempt, and nonce come from the token, never
 /// from the params.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CloneParams {
     /// Source repository path (the mirror).
     pub source_repo: String,
@@ -69,6 +136,7 @@ pub struct CloneParams {
 /// the full file contents from `contents_hex`; `delete` removes the file and
 /// must not carry `contents_hex`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PatchParam {
     /// Repository-relative path.
     pub path: String,
@@ -82,6 +150,7 @@ pub struct PatchParam {
 
 /// `apply_change` parameters.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApplyParams {
     /// Patches applied all-or-nothing.
     pub patches: Vec<PatchParam>,
@@ -89,6 +158,7 @@ pub struct ApplyParams {
 
 /// `prepare_candidate` parameters.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrepareParams {
     /// Seed for the stable ChangeId.
     pub change_seed: String,
@@ -98,6 +168,7 @@ pub struct PrepareParams {
 
 /// `cleanup` parameters.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CleanupParams {
     /// Where to write the preservation bundle. Required: cleanup without a
     /// preservation receipt is refused.
@@ -105,4 +176,26 @@ pub struct CleanupParams {
     pub bundle_path: Option<String>,
     /// RFC 3339 deletion timestamp from the caller's clock.
     pub deleted_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn frame_reader_is_bounded_and_keeps_frame_boundaries() {
+        let mut input = Cursor::new(b"one\ntwo\n".to_vec());
+        assert_eq!(read_frame(&mut input).unwrap().as_deref(), Some("one"));
+        assert_eq!(read_frame(&mut input).unwrap().as_deref(), Some("two"));
+        assert!(read_frame(&mut input).unwrap().is_none());
+
+        let mut oversized = Cursor::new(vec![b'x'; MAX_FRAME_BYTES + 1]);
+        let error = read_frame(&mut oversized).expect_err("oversized refused");
+        assert_eq!(error.reason_code(), "FRAME_TOO_LARGE");
+
+        let mut invalid = Cursor::new(vec![0xff, b'\n']);
+        let error = read_frame(&mut invalid).expect_err("invalid UTF-8 refused");
+        assert_eq!(error.reason_code(), "INVALID_UTF8");
+    }
 }

@@ -4,6 +4,11 @@ use crate::scope::ScopeGrant;
 use crate::CapabilityError;
 use std::collections::{HashMap, HashSet};
 
+/// Frozen wire-contract bound for operations in one proposal.
+pub const MAX_PATCH_OPERATIONS: usize = 1_024;
+/// Frozen wire-contract bound for one replacement body.
+pub const MAX_CONTENT_BYTES: usize = 1_048_576;
+
 /// One patch operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PatchOp {
@@ -60,11 +65,26 @@ pub fn validate_batch(
     patches: &[PatchHunk],
     exists: impl Fn(&str) -> bool,
 ) -> Result<Vec<String>, CapabilityError> {
+    if patches.is_empty() || patches.len() > MAX_PATCH_OPERATIONS {
+        return Err(CapabilityError::InvalidOperationCount {
+            max: MAX_PATCH_OPERATIONS,
+            actual: patches.len(),
+        });
+    }
     let mut normalized = Vec::with_capacity(patches.len());
     let mut seen: HashSet<String> = HashSet::new();
     let mut portable: HashMap<String, String> = HashMap::new();
     for patch in patches {
         let path = grant.check(&patch.path)?;
+        if let PatchOp::Write(contents) = &patch.op {
+            if contents.len() > MAX_CONTENT_BYTES {
+                return Err(CapabilityError::ContentTooLarge {
+                    path,
+                    max: MAX_CONTENT_BYTES,
+                    actual: contents.len(),
+                });
+            }
+        }
         if !seen.insert(path.clone()) {
             return Err(CapabilityError::DuplicatePath(path));
         }
@@ -139,5 +159,27 @@ mod tests {
         ];
         let err = validate_batch(&grant(), &case_collision, |_| false).expect_err("case collision");
         assert_eq!(err.reason_code(), "PATH_COLLISION");
+    }
+
+    #[test]
+    fn empty_oversized_and_overlong_batches_are_refused() {
+        let empty = validate_batch(&grant(), &[], |_| false).expect_err("empty refused");
+        assert_eq!(empty.reason_code(), "INVALID_OPERATION_COUNT");
+
+        let too_many = vec![PatchHunk::write("src/x.rs", vec![]); MAX_PATCH_OPERATIONS + 1];
+        let error = validate_batch(&grant(), &too_many, |_| false).expect_err("count refused");
+        assert_eq!(error.reason_code(), "INVALID_OPERATION_COUNT");
+
+        let error = validate_batch(
+            &grant(),
+            &[PatchHunk::write(
+                "src/huge.rs",
+                vec![0; MAX_CONTENT_BYTES + 1],
+            )],
+            |_| false,
+        )
+        .expect_err("content refused");
+        assert_eq!(error.reason_code(), "CONTENT_TOO_LARGE");
+        assert!(error.to_string().contains("src/huge.rs"));
     }
 }

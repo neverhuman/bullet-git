@@ -16,7 +16,7 @@ mod status;
 
 pub use clone::{CloneRequest, PreservationReceipt, PrivateClone, WorkspaceManifest};
 pub use mirror::{mirror_dir, MirrorLock, LOCK_MAX_WAIT, LOCK_STALE_AFTER};
-pub use patch::{validate_batch, PatchHunk, PatchOp};
+pub use patch::{validate_batch, PatchHunk, PatchOp, MAX_CONTENT_BYTES, MAX_PATCH_OPERATIONS};
 pub use repository::{AgentRepository, CommitIdentity, ExpectedAuthority, RealRepository};
 pub use safe_git::{FileProtocol, GitOutput, HeadState, SafeGit};
 pub use scope::{normalize_rel_path, ScopeGrant};
@@ -42,6 +42,24 @@ pub enum CapabilityError {
     /// A batch named the same normalized path more than once.
     #[error("duplicate or conflicting patch path: {0}")]
     DuplicatePath(String),
+    /// A patch batch was empty or exceeded the admitted operation bound.
+    #[error("patch operation count is outside 1..={max}: {actual}")]
+    InvalidOperationCount {
+        /// Admitted upper bound.
+        max: usize,
+        /// Received operation count.
+        actual: usize,
+    },
+    /// One write exceeded the admitted byte bound.
+    #[error("patch contents too large at {path}: {actual} bytes exceeds {max}")]
+    ContentTooLarge {
+        /// Refused normalized path.
+        path: String,
+        /// Admitted upper bound.
+        max: usize,
+        /// Received content length.
+        actual: usize,
+    },
     /// Two paths collide after portable case folding.
     #[error("portable path collision: {first} conflicts with {second}")]
     PathCollision {
@@ -112,6 +130,8 @@ impl CapabilityError {
             Self::OutOfScope(_) => "OUT_OF_SCOPE",
             Self::PathAbsent(_) => "PATH_ABSENT",
             Self::DuplicatePath(_) => "DUPLICATE_PATH",
+            Self::InvalidOperationCount { .. } => "INVALID_OPERATION_COUNT",
+            Self::ContentTooLarge { .. } => "CONTENT_TOO_LARGE",
             Self::PathCollision { .. } => "PATH_COLLISION",
             Self::SymlinkForbidden(_) => "SYMLINK_FORBIDDEN",
             Self::WorktreeForbidden(_) => "WORKTREE_FORBIDDEN",
