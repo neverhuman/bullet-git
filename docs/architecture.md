@@ -1,6 +1,6 @@
 # BulletGit architecture
 
-Status: workspace daemon v1
+Status: component primitives (workspace daemon); no transaction or production claim
 Owner: Bullet Farm maintainers
 Last reviewed: 2026-08-24
 Applies to: bullet-git
@@ -18,7 +18,7 @@ that boundary everything is ordinary blobs, trees, commits, and refs.
 
 | Crate | Role |
 |---|---|
-| `bullet-git-types` | ChangeId/CandidateId/CheckpointId, validated `GitOid` (40 lowercase hex), `Candidate` (spec §6.13 subset), `ProofRoot`, framed digests, `WireAuthorityToken` |
+| `bullet-git-types` | ChangeId/CandidateId/CheckpointId, validated `GitOid` (40 lowercase hex), `Candidate` (spec §6.13 minus `toolchain_digest`; `lineage_subject` and `environment_digest` are optional and outside `CandidateId`/`ProofRoot`), `ProofRoot`, framed digests, `WireAuthorityToken` |
 | `bullet-git-journal` | append-only workspace journal and checkpoints |
 | `bullet-git-workspace` | `SafeGit` hardened command builder, mirror-under-lock source fetch, `PrivateClone` lifecycle (§20.2), `ScopeGrant`, `RealRepository` capability API over real Git |
 | `bullet-gitd` | the stdio daemon binary plus `MemoryRepository`, an in-process fake with the same authority and scope rules |
@@ -27,16 +27,18 @@ that boundary everything is ordinary blobs, trees, commits, and refs.
 
 ```text
 <root>/work/<attempt_id>/repo      private clone (no remote survives)
-<root>/runtime/<attempt_id>/       manifest.json, isolation dirs, tombstone.json
+<root>/runtime/<attempt_id>/       manifest.json, isolation dirs, tombstone.json,
+                                   transient tmp-index-<n> files during checkpoints
 <root>/mirrors/<digest>.git        bare mirror per source repository
                                    (digest = BLAKE3 of the canonical source path)
 <root>/mirrors/<digest>.git.lock   exclusive mirror lock; holder pid inside
 branch                             bullet/<variant_id>/<attempt_id>
 ```
 
-The `WorkspaceManifest` (base sha, branch, created_at from the caller's
-clock, 32-byte nonce hex, source and mirror paths) is recorded in the
-runtime dir, never inside the repository tree.
+The `WorkspaceManifest` (attempt and variant ids, base sha, branch,
+created_at from the caller's clock, 32-byte nonce hex, repo, source and
+mirror paths) is recorded in the runtime dir, never inside the repository
+tree.
 
 ## Trust model
 
@@ -72,14 +74,21 @@ runtime dir, never inside the repository tree.
   to exactly the one local clone call that needs the file transport.
 - **Scope.** `apply_change` validates every path against the `ScopeGrant`
   prefixes before writing anything: segment-wise prefix match on normalized
-  paths (no `..`, `.` or empty segments, no `.git` component, no absolute
-  paths, no symlink traversal or symlink targets). Validation is
-  all-or-nothing — one bad path leaves the tree untouched.
+  paths. Normalization applies Unicode NFC and refuses `..`, `.` or empty
+  segments, any `.git` component (ASCII case-insensitive), absolute paths,
+  backslashes, NUL bytes, `:` inside a segment (alternate data streams),
+  segments ending in `.` or a space, and symlink traversal or symlink
+  targets. Validation is all-or-nothing — one bad path leaves the tree
+  untouched.
+- **Batch admission.** A batch is refused before any mutation when two
+  entries normalize to the same path (`DUPLICATE_PATH`) or fold to the same
+  case-insensitive key (`PATH_COLLISION`); multi-step sequences on one path
+  must be collapsed by the proposal producer.
 - **Deletes.** A patch entry may carry `"op": "delete"`. The target must
-  be an existing regular file (else typed `PATH_ABSENT`), scope rules apply
-  exactly as for writes, and validation of the whole batch — including
-  delete-target existence, simulated in batch order — happens before any
-  mutation. The journal records the digest of the destroyed contents
+  be an existing regular file on disk when the batch is validated (else
+  typed `PATH_ABSENT`), scope rules apply exactly as for writes, and the
+  whole batch is validated before any mutation. The journal records the
+  digest of the destroyed contents
   (before-state), and the deletion reaches checkpoints and the prepared
   Candidate through the same porcelain scan and commit as writes, so
   deleted files never linger in the tree or the candidate.
@@ -119,8 +128,9 @@ response: {"id": <same>, "ok": <result>}
 
 The `token` field carries the kernel `AuthorityToken` as a JSON object
 (unknown fields ignored; `variant_id`, `attempt_id`, `attempt_fence`,
-`workspace_nonce` required). A string token is treated as raw bytes and a
-missing/null token as empty — both fail closed as `UNAUTHORIZED`.
+`workspace_nonce` required). A string token is parsed as JSON text and a
+missing/null token as empty; anything that does not parse to a valid token
+fails closed as `UNAUTHORIZED`.
 
 `clone` must be the first call; the daemon then serves exactly one workspace
 session and fences every subsequent call with the clone-time token values.
@@ -131,7 +141,7 @@ session and fences every subsequent call with the clone-time token values.
 | `read_tree` | — | `files`: tracked paths |
 | `apply_change` | `patches`: `[{path, op?, contents_hex?}]` — `op` is `write` (default; full-file `contents_hex` required, hex) or `delete` (must omit `contents_hex`) | `applied`: count |
 | `checkpoint` | — | Checkpoint JSON incl. `git_tree` |
-| `prepare_candidate` | `change_seed`, `mission` | Candidate JSON (exact SHAs, `patch_hash`) |
+| `prepare_candidate` | `change_seed`, `mission` | Candidate JSON (exact SHAs, `patch_hash`; `lineage_subject`/`environment_digest` are `null` until a producer populates them) |
 | `cleanup` | `bundle_path` (required receipt target), `deleted_at` | `tombstone`, `bundle`, `verified` |
 
 Example conversation:
@@ -148,14 +158,15 @@ Example conversation:
 ```
 
 Error codes: `UNAUTHORIZED`, `STALE_AUTHORITY`, `OUT_OF_SCOPE`,
-`PATH_ABSENT`, `SYMLINK_FORBIDDEN`, `WORKTREE_FORBIDDEN`,
-`WRONG_REPOSITORY`, `WRONG_BRANCH`, `SEQUENCER_ACTIVE`,
-`UNCLASSIFIED_UNTRACKED`, `BASE_MISSING`, `MIRROR_LOCK_TIMEOUT`,
-`CLEANUP_NONCE_MISMATCH`, `CLEANUP_RECEIPT_REQUIRED`, `GIT_FAILED`,
-`IO_FAILED`, `INVALID_TYPES`, plus protocol-level `BAD_REQUEST`,
-`NOT_CLONED`, `ALREADY_CLONED`, `UNKNOWN_METHOD`, `ENCODING`.
-All v1 codes are unchanged; `PATH_ABSENT` and `MIRROR_LOCK_TIMEOUT` are
-additive, as is the optional patch `op` field.
+`PATH_ABSENT`, `DUPLICATE_PATH`, `PATH_COLLISION`, `SYMLINK_FORBIDDEN`,
+`WORKTREE_FORBIDDEN`, `WRONG_REPOSITORY`, `WRONG_BRANCH`,
+`SEQUENCER_ACTIVE`, `UNCLASSIFIED_UNTRACKED`, `BASE_MISSING`,
+`MIRROR_LOCK_TIMEOUT`, `CLEANUP_NONCE_MISMATCH`, `CLEANUP_RECEIPT_REQUIRED`,
+`GIT_FAILED`, `IO_FAILED`, `INVALID_TYPES`, plus protocol-level
+`BAD_REQUEST`, `NOT_CLONED`, `ALREADY_CLONED`, `UNKNOWN_METHOD`, `ENCODING`.
+All v1 codes are unchanged; `PATH_ABSENT`, `DUPLICATE_PATH`,
+`PATH_COLLISION`, and `MIRROR_LOCK_TIMEOUT` are additive, as is the optional
+patch `op` field.
 
 ## Hash framing
 

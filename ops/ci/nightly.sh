@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Live jeryu-gitd oracle. Skip when the feature or pin is missing.
+# Live jeryu-gitd oracle lane. Unset BULLET_LIVE_GITD: neutral, nothing registered.
+# Set: no oracle adapter is registered yet, so the request fails closed instead of
+# reporting a green lane that ran nothing.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
 log "nightly lane"
 if [[ -z "${BULLET_LIVE_GITD:-}" ]]; then
-  log "BULLET_LIVE_GITD unset; skip live gitd"
+  log "BULLET_LIVE_GITD unset; no live gitd lane registered"
   exit 0
 fi
-log "live gitd requested; adapter not implemented yet"
-exit 0
+echo "[ci] BULLET_LIVE_GITD requested but no live jeryu-gitd oracle lane is registered" >&2
+exit 1
