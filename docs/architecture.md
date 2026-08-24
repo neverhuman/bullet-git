@@ -20,7 +20,7 @@ that boundary everything is ordinary blobs, trees, commits, and refs.
 |---|---|
 | `bullet-git-types` | ChangeId/CandidateId/CheckpointId, validated `GitOid` (40 lowercase hex), `Candidate` (spec §6.13 minus `toolchain_digest`; `lineage_subject` and `environment_digest` are optional and outside `CandidateId`/`ProofRoot`), `ProofRoot`, framed digests, `WireAuthorityToken` |
 | `bullet-git-journal` | append-only workspace journal and checkpoints |
-| `bullet-git-workspace` | `SafeGit` hardened command builder, mirror-under-lock source fetch, `PrivateClone` lifecycle (§20.2), `ScopeGrant`, `RealRepository` capability API over real Git |
+| `bullet-git-workspace` | `SafeGit` hardened command builder and local-config admission, mirror-under-lock source fetch, `PrivateClone` lifecycle (§20.2), `ScopeGrant`, `RealRepository` capability API over real Git |
 | `bullet-gitd` | the stdio daemon binary plus `MemoryRepository`, an in-process fake with the same authority and scope rules |
 
 ## Workspace layout (spec §20.1)
@@ -68,10 +68,19 @@ tree.
 - **Hostile-git controls (spec §20.3).** The child environment is cleared
   (strips every inherited `GIT_*` variable) and rebuilt with per-workspace
   `HOME`/`XDG_CONFIG_HOME`/`XDG_CACHE_HOME`, `GIT_CONFIG_NOSYSTEM=1`,
-  `GIT_CONFIG_GLOBAL=/dev/null`. Every invocation passes
+  `GIT_CONFIG_GLOBAL=/dev/null`. Every invocation disables paging, hooks,
+  credentials, filesystem monitors, external attribute/exclude files, and
+  commit/tag signing, and passes
   `-c core.hooksPath=<empty dir> -c credential.helper=
   -c include.path=/dev/null -c protocol.file.allow=never` — `user` is scoped
-  to exactly the one local clone call that needs the file transport.
+  to exactly the one local clone call that needs the file transport. Before
+  every repository-scoped invocation, BulletGit parses the exact local config
+  with includes disabled. A non-regular config or any command-bearing or
+  truth-redirecting filter, include, alias, pager, URL rewrite, remote helper,
+  diff/textconv, merge driver, submodule update, credential, signing, editor,
+  sparse, SSH, hook, worktree, or external attribute/exclude setting fails
+  closed with `HOSTILE_GIT_CONFIG`. A real-repository test plants a clean
+  filter and canary behind `.gitattributes` and proves refusal before execution.
 - **Scope.** `apply_change` validates every path against the `ScopeGrant`
   prefixes before writing anything: segment-wise prefix match on normalized
   paths. Normalization applies Unicode NFC and refuses `..`, `.` or empty
@@ -162,7 +171,7 @@ Error codes: `UNAUTHORIZED`, `STALE_AUTHORITY`, `OUT_OF_SCOPE`,
 `WORKTREE_FORBIDDEN`, `WRONG_REPOSITORY`, `WRONG_BRANCH`,
 `SEQUENCER_ACTIVE`, `UNCLASSIFIED_UNTRACKED`, `BASE_MISSING`,
 `MIRROR_LOCK_TIMEOUT`, `CLEANUP_NONCE_MISMATCH`, `CLEANUP_RECEIPT_REQUIRED`,
-`GIT_FAILED`, `IO_FAILED`, `INVALID_TYPES`, plus protocol-level
+`HOSTILE_GIT_CONFIG`, `GIT_FAILED`, `IO_FAILED`, `INVALID_TYPES`, plus protocol-level
 `BAD_REQUEST`, `NOT_CLONED`, `ALREADY_CLONED`, `UNKNOWN_METHOD`, `ENCODING`.
 All v1 codes are unchanged; `PATH_ABSENT`, `DUPLICATE_PATH`,
 `PATH_COLLISION`, and `MIRROR_LOCK_TIMEOUT` are additive, as is the optional
