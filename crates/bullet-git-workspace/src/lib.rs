@@ -6,6 +6,7 @@
 
 mod apply;
 mod clone;
+mod git_config;
 mod mirror;
 mod patch;
 mod repository;
@@ -87,6 +88,9 @@ pub enum CapabilityError {
     /// A git command exited unsuccessfully.
     #[error("git command failed: {0}")]
     Git(String),
+    /// Repository-local Git configuration could execute code or redirect truth.
+    #[error("hostile repository-local git config: {0}")]
+    HostileGitConfig(String),
     /// Filesystem or process failure.
     #[error("workspace io failure: {0}")]
     Io(String),
@@ -117,6 +121,7 @@ impl CapabilityError {
             Self::CleanupNonceMismatch => "CLEANUP_NONCE_MISMATCH",
             Self::CleanupReceiptRequired(_) => "CLEANUP_RECEIPT_REQUIRED",
             Self::Git(_) => "GIT_FAILED",
+            Self::HostileGitConfig(_) => "HOSTILE_GIT_CONFIG",
             Self::Io(_) => "IO_FAILED",
             Self::Types(_) => "INVALID_TYPES",
         }

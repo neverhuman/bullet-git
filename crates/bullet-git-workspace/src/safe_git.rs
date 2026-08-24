@@ -1,6 +1,6 @@
 //! Hardened git command builder (spec §20.3 hostile-git controls).
 
-use crate::{io_err, CapabilityError};
+use crate::{git_config, io_err, CapabilityError};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -51,7 +51,9 @@ impl GitOutput {
 /// `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=<deny script>`, and
 /// `GIT_SSH_COMMAND=false`. Every invocation also passes
 /// `-c core.hooksPath=<empty dir> -c credential.helper=
-/// -c protocol.file.allow=<never|user> -c include.path=/dev/null`.
+/// -c protocol.file.allow=<never|user> -c include.path=/dev/null`. Before any
+/// repository-scoped call, the exact local config is read without includes and
+/// rejected if it contains a command-bearing or truth-redirecting key.
 #[derive(Debug)]
 pub struct SafeGit {
     home_dir: PathBuf,
@@ -89,9 +91,24 @@ impl SafeGit {
         })
     }
 
-    /// Build a hardened git command.
-    #[must_use]
-    pub fn command(&self, repo: Option<&Path>, file_protocol: FileProtocol) -> Command {
+    /// Build a hardened git command after validating repository-local config.
+    ///
+    /// # Errors
+    ///
+    /// Returns `HOSTILE_GIT_CONFIG` when local configuration can execute code,
+    /// include another config source, or redirect repository truth.
+    pub fn command(
+        &self,
+        repo: Option<&Path>,
+        file_protocol: FileProtocol,
+    ) -> Result<Command, CapabilityError> {
+        if let Some(repo) = repo {
+            git_config::validate(repo, self.base_command(None, FileProtocol::Never))?;
+        }
+        Ok(self.base_command(repo, file_protocol))
+    }
+
+    fn base_command(&self, repo: Option<&Path>, file_protocol: FileProtocol) -> Command {
         let mut cmd = Command::new("git");
         cmd.env_clear();
         if let Some(path) = std::env::var_os("PATH") {
@@ -110,14 +127,25 @@ impl SafeGit {
             FileProtocol::Never => "never",
             FileProtocol::User => "user",
         };
-        cmd.arg("-c")
+        cmd.arg("--no-pager")
+            .arg("-c")
             .arg(format!("core.hooksPath={}", self.hooks_dir.display()))
             .arg("-c")
             .arg("credential.helper=")
             .arg("-c")
             .arg(format!("protocol.file.allow={allow}"))
             .arg("-c")
-            .arg("include.path=/dev/null");
+            .arg("include.path=/dev/null")
+            .arg("-c")
+            .arg("core.fsmonitor=false")
+            .arg("-c")
+            .arg("core.attributesFile=/dev/null")
+            .arg("-c")
+            .arg("core.excludesFile=/dev/null")
+            .arg("-c")
+            .arg("commit.gpgSign=false")
+            .arg("-c")
+            .arg("tag.gpgSign=false");
         if let Some(repo) = repo {
             cmd.arg("-C").arg(repo);
         }
@@ -136,7 +164,7 @@ impl SafeGit {
         args: &[&str],
         extra_env: &[(&str, OsString)],
     ) -> Result<GitOutput, CapabilityError> {
-        let mut cmd = self.command(repo, file_protocol);
+        let mut cmd = self.command(repo, file_protocol)?;
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
@@ -160,7 +188,7 @@ impl SafeGit {
     ///
     /// Returns `IO_FAILED` only when the process cannot be spawned.
     pub fn probe(&self, repo: Option<&Path>, args: &[&str]) -> Result<bool, CapabilityError> {
-        let mut cmd = self.command(repo, FileProtocol::Never);
+        let mut cmd = self.command(repo, FileProtocol::Never)?;
         cmd.args(args);
         let out = cmd
             .output()
@@ -175,7 +203,7 @@ impl SafeGit {
     /// Returns `GIT_FAILED` when git reports anything other than a branch
     /// (exit 0) or a detached HEAD (exit 1).
     pub fn head_state(&self, repo: &Path) -> Result<HeadState, CapabilityError> {
-        let mut cmd = self.command(Some(repo), FileProtocol::Never);
+        let mut cmd = self.command(Some(repo), FileProtocol::Never)?;
         cmd.args(["symbolic-ref", "-q", "HEAD"]);
         let out = cmd
             .output()
@@ -203,7 +231,9 @@ mod tests {
     fn command_environment_is_isolated() {
         let dir = tempfile::tempdir().expect("tempdir");
         let git = SafeGit::new(dir.path()).expect("safe git");
-        let cmd = git.command(None, FileProtocol::Never);
+        let cmd = git
+            .command(None, FileProtocol::Never)
+            .expect("safe command");
         let envs: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
         let get = |key: &str| {
             envs.iter()
@@ -224,6 +254,8 @@ mod tests {
         assert!(args.contains(&"credential.helper=".to_string()));
         assert!(args.contains(&"protocol.file.allow=never".to_string()));
         assert!(args.contains(&"include.path=/dev/null".to_string()));
+        assert!(args.contains(&"core.fsmonitor=false".to_string()));
+        assert!(args.contains(&"commit.gpgSign=false".to_string()));
         assert!(args.iter().any(|a| a.starts_with("core.hooksPath=")));
     }
 
@@ -231,7 +263,9 @@ mod tests {
     fn clone_call_scopes_file_protocol_to_user() {
         let dir = tempfile::tempdir().expect("tempdir");
         let git = SafeGit::new(dir.path()).expect("safe git");
-        let cmd = git.command(None, FileProtocol::User);
+        let cmd = git
+            .command(None, FileProtocol::User)
+            .expect("safe clone command");
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())

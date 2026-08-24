@@ -191,6 +191,46 @@ fn hostile_hooks_and_home_config_never_execute() {
 }
 
 #[test]
+fn repository_local_clean_filter_is_refused_before_execution() {
+    use std::io::Write;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let canary = tmp.path().join("filter-canary");
+    let filter = tmp.path().join("clean-filter.sh");
+    write_executable(
+        &filter,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", canary.display()),
+    );
+    let mut repo = real_repo(workspace, ATTEMPT);
+    let auth = good_auth();
+    repo.apply_change(&auth, &[patch("src/lib.rs", "pub fn filtered() {}\n")])
+        .expect("apply before hostile config");
+    std::fs::write(
+        repo.workspace().repo_dir().join(".gitattributes"),
+        "*.rs filter=bullet-canary\n",
+    )
+    .expect("hostile attributes");
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(repo.workspace().repo_dir().join(".git/config"))
+        .expect("open local config");
+    writeln!(
+        config,
+        "[filter \"bullet-canary\"]\n\tclean = {}\n\trequired = true",
+        filter.display()
+    )
+    .expect("plant local filter");
+    drop(config);
+
+    let error = repo.checkpoint(&auth).expect_err("hostile filter refused");
+    assert_eq!(error.reason_code(), "HOSTILE_GIT_CONFIG");
+    assert!(error.to_string().contains("filter.bullet-canary.clean"));
+    assert!(!canary.exists(), "repository-local clean filter executed");
+}
+
+#[test]
 fn delete_of_tracked_file_lands_in_candidate_and_journal() {
     use bullet_git_journal::JournalOpKind;
     use bullet_git_types::Digest as ContentDigest;
