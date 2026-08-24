@@ -45,27 +45,30 @@ impl JournalError {
 pub struct JournalMutation {
     path: String,
     kind: JournalOpKind,
-    digest: Digest,
+    before: Option<Digest>,
+    after: Option<Digest>,
 }
 
 impl JournalMutation {
-    /// Bind a write to its after-state bytes.
+    /// Bind a write to immutable before/after content objects.
     #[must_use]
-    pub fn write(path: &str, contents: &[u8]) -> Self {
+    pub fn write(path: &str, before: Option<Digest>, after: Digest) -> Self {
         Self {
             path: path.to_owned(),
             kind: JournalOpKind::Write,
-            digest: Digest::of(contents),
+            before,
+            after: Some(after),
         }
     }
 
-    /// Bind a deletion to its destroyed before-state bytes.
+    /// Bind a deletion to its immutable destroyed before-state object.
     #[must_use]
-    pub fn delete(path: &str, before: &[u8]) -> Self {
+    pub fn delete(path: &str, before: Digest) -> Self {
         Self {
             path: path.to_owned(),
             kind: JournalOpKind::Delete,
-            digest: Digest::of(before),
+            before: Some(before),
+            after: None,
         }
     }
 }
@@ -131,7 +134,8 @@ impl DurableJournal {
                 seq,
                 path: mutation.path.clone(),
                 kind: mutation.kind,
-                digest: mutation.digest,
+                before: mutation.before,
+                after: mutation.after,
             });
         }
         let end_seq = ops

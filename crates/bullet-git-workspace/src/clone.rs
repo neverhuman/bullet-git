@@ -5,7 +5,7 @@ use crate::safe_git::{FileProtocol, HeadState, SafeGit};
 use crate::{io_err, CapabilityError};
 use bullet_git_types::GitOid;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 /// Inputs for private clone creation. Clock and nonce come from the caller so
@@ -87,8 +87,10 @@ impl PrivateClone {
     /// `WRONG_REPOSITORY`, `GIT_FAILED`, or `IO_FAILED`.
     pub fn create(req: &CloneRequest<'_>) -> Result<Self, CapabilityError> {
         let base = GitOid::new(req.base_sha)?;
-        let runtime_dir = req.root.join("runtime").join(req.attempt_id);
-        fs::create_dir_all(&runtime_dir).map_err(|err| io_err("create runtime dir", &err))?;
+        let runtime_root = req.root.join("runtime");
+        prepare_private_directory(&runtime_root)?;
+        let runtime_dir = runtime_root.join(req.attempt_id);
+        prepare_private_directory(&runtime_dir)?;
         let git = SafeGit::new(&runtime_dir)?;
         let mirror = sync_mirror(&git, req.root, req.source_repo)?;
         let commitish = format!("{base}^{{commit}}");
@@ -243,6 +245,51 @@ impl PrivateClone {
         let path = self.runtime_dir.join("tombstone.json");
         fs::write(&path, tombstone.to_string()).map_err(|err| io_err("write tombstone", &err))?;
         Ok(path)
+    }
+}
+
+fn prepare_private_directory(path: &Path) -> Result<(), CapabilityError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => require_ordinary_runtime_directory(path, &metadata)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match fs::create_dir(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(path)
+                    .map_err(|error| io_err("reinspect runtime directory", &error))?;
+                require_ordinary_runtime_directory(path, &metadata)?;
+            }
+            Err(error) => return Err(io_err("create runtime directory", &error)),
+        },
+        Err(error) => return Err(io_err("inspect runtime directory", &error)),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| io_err("secure runtime directory", &error))?;
+    }
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| io_err("sync runtime directory", &error))?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| io_err("sync runtime parent", &error))?;
+    }
+    Ok(())
+}
+
+fn require_ordinary_runtime_directory(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), CapabilityError> {
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        Ok(())
+    } else {
+        Err(CapabilityError::Io(format!(
+            "runtime path is not an ordinary directory: {}",
+            path.display()
+        )))
     }
 }
 

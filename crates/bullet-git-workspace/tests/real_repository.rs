@@ -3,7 +3,10 @@
 mod support;
 
 use bullet_git_types::{AuthorityEnvelope, Candidate, Change, ChangeId, Digest};
-use bullet_git_workspace::{AgentRepository, FileProtocol, PatchHunk};
+use bullet_git_workspace::{
+    cas_digest, AgentRepository, CommitIdentity, ExpectedAuthority, FileProtocol, ImmutableCas,
+    PatchHunk, RealRepository, ScopeGrant, MAX_CAS_OBJECT_BYTES,
+};
 use support::{
     clone_workspace, envelope, good_auth, init_source, real_repo, ATTEMPT, FENCE, NONCE,
 };
@@ -42,6 +45,7 @@ fn full_lifecycle_produces_exact_candidate() {
     repo.apply_change(&auth, &[patch("src/lib.rs", "pub fn hello() {}\n")])
         .expect("apply");
     let checkpoint = repo.checkpoint(&auth).expect("checkpoint");
+    assert!(checkpoint.identity_is_valid());
     let git_tree = checkpoint.git_tree.expect("git tree");
     assert_eq!(git_tree.as_str().len(), 40);
     // R7: the checkpoint must not stage anything in the live index.
@@ -91,9 +95,68 @@ fn journal_reopens_from_the_workspace_runtime_directory() {
         reopened
             .checkpoint(&auth)
             .expect("reopened checkpoint")
-            .tree,
-        expected_checkpoint.tree
+            .digest,
+        expected_checkpoint.digest
     );
+}
+
+#[test]
+fn cas_publication_before_tree_mutation_recovers_the_prior_checkpoint() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let mut repo = real_repo(workspace, ATTEMPT);
+    let auth = good_auth();
+    let before = repo.checkpoint(&auth).expect("prior checkpoint");
+    let workspace = repo.into_workspace();
+
+    let cas = ImmutableCas::open(workspace.runtime_dir().join("cas")).expect("open CAS");
+    let orphan = cas
+        .put(b"published without journal batch")
+        .expect("put orphan");
+    drop(cas);
+
+    let mut reopened = real_repo(workspace, ATTEMPT);
+    assert!(reopened.journal_ops().is_empty());
+    assert_eq!(
+        reopened.checkpoint(&auth).expect("prior").digest,
+        before.digest
+    );
+    let cas =
+        ImmutableCas::open(reopened.workspace().runtime_dir().join("cas")).expect("reopen CAS");
+    assert_eq!(
+        cas.get(&orphan.digest).expect("read orphan"),
+        Some(b"published without journal batch".to_vec())
+    );
+}
+
+#[test]
+fn reopen_fails_closed_when_a_journal_content_object_is_missing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let mut repo = real_repo(workspace, ATTEMPT);
+    repo.apply_change(&good_auth(), &[patch("src/lib.rs", "changed\n")])
+        .expect("apply");
+    let missing = repo.journal_ops()[0].after.expect("after object");
+    let workspace = repo.into_workspace();
+    std::fs::remove_file(workspace.runtime_dir().join("cas").join(missing.to_hex()))
+        .expect("remove object");
+
+    let error = match RealRepository::new(
+        workspace,
+        ScopeGrant::new(&["src".into(), "docs".into()]).expect("grant"),
+        ExpectedAuthority {
+            attempt_id: ATTEMPT.into(),
+            attempt_fence: FENCE,
+            workspace_nonce: NONCE,
+        },
+        CommitIdentity::farm(support::COMMIT_DATE),
+    ) {
+        Ok(_) => panic!("missing object accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.reason_code(), "CAS_CORRUPT");
 }
 
 #[test]
@@ -117,6 +180,24 @@ fn journal_append_failure_restores_the_applied_file_batch() {
     assert_eq!(error.reason_code(), "JOURNAL_FAILED");
     assert_eq!(std::fs::read(&target).expect("read restored file"), before);
     assert!(repo.journal_ops().is_empty(), "failed batch became visible");
+}
+
+#[test]
+fn oversized_preimage_is_refused_before_tree_or_journal_mutation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let target = workspace.repo_dir().join("src/lib.rs");
+    let oversized = vec![b'x'; MAX_CAS_OBJECT_BYTES + 1];
+    std::fs::write(&target, &oversized).expect("oversized preimage fixture");
+    let mut repo = real_repo(workspace, ATTEMPT);
+
+    let error = repo
+        .apply_change(&good_auth(), &[patch("src/lib.rs", "replacement\n")])
+        .expect_err("oversized preimage refused");
+    assert_eq!(error.reason_code(), "CAS_OBJECT_TOO_LARGE");
+    assert_eq!(std::fs::read(&target).expect("unchanged tree"), oversized);
+    assert!(repo.journal_ops().is_empty(), "journal must remain prior");
 }
 
 #[test]
@@ -286,7 +367,6 @@ fn repository_local_clean_filter_is_refused_before_execution() {
 #[test]
 fn delete_of_tracked_file_lands_in_candidate_and_journal() {
     use bullet_git_journal::JournalOpKind;
-    use bullet_git_types::Digest as ContentDigest;
     let tmp = tempfile::tempdir().expect("tempdir");
     let (src, base) = init_source(tmp.path());
     let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
@@ -299,7 +379,8 @@ fn delete_of_tracked_file_lands_in_candidate_and_journal() {
     assert!(!target.exists(), "file removed from the working tree");
     let op = repo.journal_ops().last().expect("journal op");
     assert_eq!(op.kind, JournalOpKind::Delete);
-    assert_eq!(op.digest, ContentDigest::of(&before), "before-state digest");
+    assert_eq!(op.before, Some(cas_digest(&before)), "before-state object");
+    assert_eq!(op.after, None);
     let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
     assert!(candidate.actual_scope.contains(&"src/lib.rs".to_string()));
     let listed = repo

@@ -1,6 +1,11 @@
 use std::fs;
 
 use bullet_git_journal::{DurableJournal, JournalMutation};
+use bullet_git_types::Digest;
+
+fn object(bytes: &[u8]) -> Digest {
+    Digest::of(bytes)
+}
 
 fn batch_files(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut files = fs::read_dir(directory)
@@ -22,8 +27,8 @@ fn batch_is_one_immutable_file_and_recovers_exactly() {
     let mut journal = DurableJournal::open(&directory).expect("open");
     journal
         .record_batch(&[
-            JournalMutation::write("src/a.rs", b"one"),
-            JournalMutation::delete("src/b.rs", b"before"),
+            JournalMutation::write("src/a.rs", None, object(b"one")),
+            JournalMutation::delete("src/b.rs", object(b"before")),
         ])
         .expect("record batch");
     let expected_ops = journal.ops().to_vec();
@@ -42,10 +47,10 @@ fn corruption_and_sequence_gaps_fail_closed() {
     let directory = temp.path().join("corrupt");
     let mut journal = DurableJournal::open(&directory).expect("open");
     journal
-        .record_batch(&[JournalMutation::write("src/a.rs", b"one")])
+        .record_batch(&[JournalMutation::write("src/a.rs", None, object(b"one"))])
         .expect("first");
     journal
-        .record_batch(&[JournalMutation::write("src/b.rs", b"two")])
+        .record_batch(&[JournalMutation::write("src/b.rs", None, object(b"two"))])
         .expect("second");
     let files = batch_files(&directory);
     fs::remove_file(&files[0]).expect("create gap");
@@ -55,7 +60,7 @@ fn corruption_and_sequence_gaps_fail_closed() {
     let directory = temp.path().join("checksum");
     let mut journal = DurableJournal::open(&directory).expect("open");
     journal
-        .record_batch(&[JournalMutation::write("src/a.rs", b"one")])
+        .record_batch(&[JournalMutation::write("src/a.rs", None, object(b"one"))])
         .expect("record");
     let file = batch_files(&directory).pop().expect("batch");
     let original = fs::read_to_string(&file).expect("read batch");
@@ -70,12 +75,27 @@ fn unknown_batch_fields_fail_closed() {
     let directory = temp.path().join("unknown-field");
     let mut journal = DurableJournal::open(&directory).expect("open");
     journal
-        .record_batch(&[JournalMutation::write("src/a.rs", b"one")])
+        .record_batch(&[JournalMutation::write("src/a.rs", None, object(b"one"))])
         .expect("record");
     let file = batch_files(&directory).pop().expect("batch");
     let original = fs::read_to_string(&file).expect("read batch");
     fs::write(&file, original.replacen('{', "{\"unknown\":true,", 1)).expect("add unknown field");
     let error = DurableJournal::open(&directory).expect_err("unknown field refused");
+    assert_eq!(error.reason_code(), "CORRUPT_JOURNAL");
+
+    let directory = temp.path().join("unknown-op-field");
+    let mut journal = DurableJournal::open(&directory).expect("open");
+    journal
+        .record_batch(&[JournalMutation::write("src/a.rs", None, object(b"one"))])
+        .expect("record");
+    let file = batch_files(&directory).pop().expect("batch");
+    let original = fs::read_to_string(&file).expect("read batch");
+    fs::write(
+        &file,
+        original.replacen("\"seq\":1", "\"unknown\":true,\"seq\":1", 1),
+    )
+    .expect("add nested unknown field");
+    let error = DurableJournal::open(&directory).expect_err("nested unknown field refused");
     assert_eq!(error.reason_code(), "CORRUPT_JOURNAL");
 }
 
@@ -88,7 +108,7 @@ fn temp_orphans_are_ignored_but_unknown_entries_are_refused() {
     fs::write(directory.join(orphan), b"partial").expect("orphan");
     let mut journal = DurableJournal::open(&directory).expect("orphan ignored");
     journal
-        .record_batch(&[JournalMutation::write("src/a.rs", b"one")])
+        .record_batch(&[JournalMutation::write("src/a.rs", None, object(b"one"))])
         .expect("append after orphan");
     drop(journal);
     fs::write(directory.join("unexpected"), b"data").expect("unknown entry");

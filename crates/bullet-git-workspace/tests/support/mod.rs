@@ -93,6 +93,12 @@ pub fn good_auth() -> AuthorityEnvelope {
 
 /// Clone a private workspace for the given attempt id.
 pub fn clone_workspace(root: &Path, src: &Path, base: &str, attempt: &str) -> PrivateClone {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+            .expect("private workspace root");
+    }
     PrivateClone::create(&CloneRequest {
         source_repo: src,
         base_sha: base,

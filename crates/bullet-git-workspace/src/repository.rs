@@ -1,6 +1,7 @@
 //! The capability API and its real-Git implementation.
 
 use crate::apply::{apply_all, restore_all};
+use crate::cas::{CasError, ImmutableCas};
 use crate::clone::{guard_repository, sequencer_check, PrivateClone};
 use crate::patch::{validate_batch, PatchHunk, PatchOp};
 use crate::safe_git::{FileProtocol, HeadState};
@@ -12,7 +13,7 @@ use bullet_git_types::{
     AuthorityEnvelope, Candidate, CandidateId, Change, Digest, GitOid, WireAuthorityToken,
 };
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File};
 
 /// Agent-facing repository capability.
 pub trait AgentRepository {
@@ -121,6 +122,7 @@ pub struct RealRepository {
     expected: ExpectedAuthority,
     identity: CommitIdentity,
     journal: DurableJournal,
+    cas: ImmutableCas,
     checkpoint_count: u64,
 }
 
@@ -133,12 +135,15 @@ impl RealRepository {
         identity: CommitIdentity,
     ) -> Result<Self, CapabilityError> {
         let journal = DurableJournal::open(workspace.runtime_dir().join("journal"))?;
+        let cas = open_workspace_cas(workspace.runtime_dir())?;
+        validate_journal_objects(&journal, &cas)?;
         Ok(Self {
             workspace,
             grant,
             expected,
             identity,
             journal,
+            cas,
             checkpoint_count: 0,
         })
     }
@@ -234,6 +239,44 @@ impl RealRepository {
         Ok(touched)
     }
 
+    fn prepare_journal_mutations(
+        &self,
+        patches: &[PatchHunk],
+        normalized: &[String],
+    ) -> Result<Vec<JournalMutation>, CapabilityError> {
+        patches
+            .iter()
+            .zip(normalized)
+            .map(|(patch, path)| {
+                let target = self.workspace.repo_dir().join(path);
+                let prior = match fs::symlink_metadata(&target) {
+                    Ok(metadata) if metadata.is_file() => Some(
+                        fs::read(&target)
+                            .map_err(|error| crate::io_err("read patch preimage", &error))?,
+                    ),
+                    Ok(_) => None,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(crate::io_err("inspect patch preimage", &error)),
+                };
+                let before = prior
+                    .as_deref()
+                    .map(|bytes| self.cas.put(bytes).map(|stored| stored.digest))
+                    .transpose()?;
+                match &patch.op {
+                    PatchOp::Write(contents) => Ok(JournalMutation::write(
+                        path,
+                        before,
+                        self.cas.put(contents)?.digest,
+                    )),
+                    PatchOp::Delete => Ok(JournalMutation::delete(
+                        path,
+                        before.expect("validated delete always has before-state bytes"),
+                    )),
+                }
+            })
+            .collect()
+    }
+
     fn write_tree_checkpoint(&mut self) -> Result<Checkpoint, CapabilityError> {
         self.checkpoint_count += 1;
         let index_path = self
@@ -254,9 +297,7 @@ impl RealRepository {
             .run(Some(&repo), FileProtocol::Never, &["write-tree"], &env)?
             .text();
         let _ = fs::remove_file(&index_path);
-        let mut checkpoint = self.journal.checkpoint();
-        checkpoint.git_tree = Some(GitOid::new(tree)?);
-        Ok(checkpoint)
+        Ok(self.journal.checkpoint().bind_git_tree(GitOid::new(tree)?))
     }
 
     fn commit_candidate(&self, change: &Change) -> Result<(GitOid, GitOid), CapabilityError> {
@@ -323,26 +364,13 @@ impl AgentRepository for RealRepository {
         self.expected.require(auth)?;
         self.guard()?;
         let normalized = self.validate_patches(patches)?;
+        let mutations = self.prepare_journal_mutations(patches, &normalized)?;
         let mut undo = Vec::new();
         let applied = apply_all(self.workspace.repo_dir(), patches, &normalized, &mut undo);
         if let Err(err) = applied {
             restore_all(&undo);
             return Err(err);
         }
-        let mutations = patches
-            .iter()
-            .zip(&normalized)
-            .zip(&undo)
-            .map(|((patch, path), (_, prior))| match &patch.op {
-                PatchOp::Write(contents) => JournalMutation::write(path, contents),
-                PatchOp::Delete => JournalMutation::delete(
-                    path,
-                    prior
-                        .as_deref()
-                        .expect("validated delete always has before-state bytes"),
-                ),
-            })
-            .collect::<Vec<_>>();
         if let Err(error) = self.journal.record_batch(&mutations) {
             if !error.may_have_published() {
                 restore_all(&undo);
@@ -399,4 +427,47 @@ impl AgentRepository for RealRepository {
             environment_digest: None,
         })
     }
+}
+
+fn open_workspace_cas(runtime_dir: &std::path::Path) -> Result<ImmutableCas, CapabilityError> {
+    let root = runtime_dir.join("cas");
+    match fs::symlink_metadata(&root) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&root).map_err(|error| crate::io_err("create workspace CAS", &error))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+                    .map_err(|error| crate::io_err("secure workspace CAS", &error))?;
+            }
+            File::open(runtime_dir)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| crate::io_err("sync workspace runtime", &error))?;
+        }
+        Err(error) => return Err(crate::io_err("inspect workspace CAS", &error)),
+    }
+    ImmutableCas::open(&root).map_err(Into::into)
+}
+
+fn validate_journal_objects(
+    journal: &DurableJournal,
+    cas: &ImmutableCas,
+) -> Result<(), CapabilityError> {
+    for op in journal.ops() {
+        for digest in [op.before.as_ref(), op.after.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if cas.get(digest)?.is_none() {
+                return Err(CasError::Corrupt(format!(
+                    "journal sequence {} references missing object {}",
+                    op.seq,
+                    digest.to_hex()
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(())
 }

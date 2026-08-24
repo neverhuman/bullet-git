@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{durable::JournalError, JournalOp};
 
-const SCHEMA_VERSION: u32 = 1;
-const DOMAIN: &[u8] = b"bullet-git-journal-batch-v1";
+const SCHEMA_VERSION: u32 = 2;
+const DOMAIN: &[u8] = b"bullet-git-journal-batch-v2";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,7 +175,12 @@ fn validate_batch(
             .start_seq
             .checked_add(offset)
             .ok_or_else(|| JournalError::Corrupt("sequence overflow".into()))?;
-        if op.seq != wanted || op.path.is_empty() || op.path.contains('\0') {
+        let content_shape_valid = match op.kind {
+            crate::JournalOpKind::Write => op.after.is_some(),
+            crate::JournalOpKind::Delete => op.before.is_some() && op.after.is_none(),
+        };
+        if op.seq != wanted || op.path.is_empty() || op.path.contains('\0') || !content_shape_valid
+        {
             return Err(JournalError::Corrupt(format!(
                 "invalid operation at sequence {wanted}"
             )));
@@ -209,9 +214,20 @@ fn batch_checksum(previous: Option<&Digest>, ops: &[JournalOp]) -> Digest {
         frame(&mut bytes, &op.seq.to_le_bytes());
         frame(&mut bytes, op.kind.frame_tag());
         frame(&mut bytes, op.path.as_bytes());
-        frame(&mut bytes, op.digest.as_bytes());
+        frame_optional_digest(&mut bytes, op.before.as_ref());
+        frame_optional_digest(&mut bytes, op.after.as_ref());
     }
     Digest::of(&bytes)
+}
+
+fn frame_optional_digest(bytes: &mut Vec<u8>, digest: Option<&Digest>) {
+    match digest {
+        Some(digest) => {
+            frame(bytes, b"present");
+            frame(bytes, digest.as_bytes());
+        }
+        None => frame(bytes, b"absent"),
+    }
 }
 
 fn create_temporary(

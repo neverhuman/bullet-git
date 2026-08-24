@@ -112,6 +112,9 @@ pub enum CapabilityError {
     /// Durable workspace journal could not append or recover safely.
     #[error("workspace journal failed: {0}")]
     Journal(String),
+    /// Immutable content storage failed or has an indeterminate publication.
+    #[error(transparent)]
+    ContentStore(#[from] CasError),
     /// Repository-local Git configuration could execute code or redirect truth.
     #[error("hostile repository-local git config: {0}")]
     HostileGitConfig(String),
@@ -148,6 +151,7 @@ impl CapabilityError {
             Self::CleanupReceiptRequired(_) => "CLEANUP_RECEIPT_REQUIRED",
             Self::Git(_) => "GIT_FAILED",
             Self::Journal(_) => "JOURNAL_FAILED",
+            Self::ContentStore(error) => error.reason_code(),
             Self::HostileGitConfig(_) => "HOSTILE_GIT_CONFIG",
             Self::Io(_) => "IO_FAILED",
             Self::Types(_) => "INVALID_TYPES",
