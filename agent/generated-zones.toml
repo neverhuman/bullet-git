@@ -1,1 +1,4 @@
-zone = []
+[[zone]]
+path = "crates/bullet-git-types/src/schema_bundle.rs"
+source = "bullet-farm:contracts/generated/rust/schema_bundle.rs via scripts/sync-family-contracts.sh"
+owner = "contracts"
