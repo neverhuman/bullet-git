@@ -3,7 +3,7 @@ default:
 
 setup:
     rustup component add rustfmt clippy
-    cargo fetch
+    cargo fetch --locked
 
 fast:
     bash scripts/ci-local.sh fast
