@@ -160,6 +160,9 @@ impl AuthorityGateway {
         operation: MutationOperation,
         authority: &Value,
         params: &Value,
+        expected_attempt: &str,
+        expected_fence: u64,
+        expected_workspace_nonce: &[u8; 32],
     ) -> Result<MutationPermit, GatewayError> {
         let fingerprint = transport_fingerprint(operation, authority, params)?;
         let input = FinalCheckInput {
@@ -175,6 +178,14 @@ impl AuthorityGateway {
         {
             return Err(GatewayError::SubjectMismatch(
                 "final-check response does not bind the exact operation and request".into(),
+            ));
+        }
+        if decision.subject.attempt_id != expected_attempt
+            || decision.subject.attempt_fence != expected_fence
+            || decision.subject.workspace_nonce != hex::encode(expected_workspace_nonce)
+        {
+            return Err(GatewayError::SubjectMismatch(
+                "final-check response does not bind the exact writer incarnation".into(),
             ));
         }
         let now = self.clock.now_unix_ms()?;
@@ -228,6 +239,8 @@ mod tests {
     use crate::mutation_ledger::{MutationOperation, MutationOutcome};
     use tempfile::TempDir;
 
+    const WRITER_NONCE: [u8; 32] = [7; 32];
+
     struct FixedClock(u64);
 
     impl Clock for FixedClock {
@@ -273,10 +286,21 @@ mod tests {
 
     fn subject() -> MutationSubject {
         MutationSubject {
+            authority_envelope_digest: "a".repeat(64),
+            authority_token_nonce: "b".repeat(64),
             mutation_id: format!("mut_{}", "1".repeat(64)),
             reservation_id: format!("rsv_{}", "2".repeat(64)),
             operation: MutationOperation::ApplyPatch,
             request_digest: "3".repeat(64),
+            repository_id: format!("rep_{}", "4".repeat(64)),
+            workspace_id: format!("wsp_{}", "5".repeat(64)),
+            workspace_generation: 6,
+            workspace_nonce: hex::encode(WRITER_NONCE),
+            attempt_id: format!("atm_{}", "8".repeat(64)),
+            attempt_fence: 9,
+            authority_epoch: 10,
+            freeze_generation: 0,
+            permit_nonce: "c".repeat(64),
             permit_digest: "4".repeat(64),
         }
     }
@@ -307,6 +331,9 @@ mod tests {
             MutationOperation::ApplyPatch,
             &serde_json::json!({"paseto": "forged"}),
             &serde_json::json!({"path": "src/lib.rs"}),
+            &subject().attempt_id,
+            subject().attempt_fence,
+            &WRITER_NONCE,
         ));
         assert_eq!(error.reason_code(), "AUTHORITY_CONTRACT_UNAVAILABLE");
     }
@@ -321,6 +348,9 @@ mod tests {
             MutationOperation::ApplyPatch,
             &authority,
             &params,
+            &subject().attempt_id,
+            subject().attempt_fence,
+            &WRITER_NONCE,
         ));
         assert_eq!(error.reason_code(), "AUTHORITY_SUBJECT_MISMATCH");
 
@@ -329,19 +359,43 @@ mod tests {
             MutationOperation::ApplyPatch,
             &authority,
             &params,
+            &subject().attempt_id,
+            subject().attempt_fence,
+            &WRITER_NONCE,
         ));
         assert_eq!(error.reason_code(), "MUTATION_PERMIT_EXPIRED");
 
-        let live_temp = tempfile::tempdir().expect("tempdir");
-        let mut live = gateway(&live_temp, 200, false);
-        let permit = live
-            .authorize(MutationOperation::ApplyPatch, &authority, &params)
-            .expect("permit");
         let changed = serde_json::json!({"path": "src/other.rs"});
-        let error = permit
-            .consume(MutationOperation::ApplyPatch, &authority, &changed, 101)
-            .expect_err("changed after check");
-        assert_eq!(error.reason_code(), "AUTHORITY_SUBJECT_MISMATCH");
+        for (operation, presented_authority, presented_params) in [
+            (
+                MutationOperation::Checkpoint,
+                authority.clone(),
+                params.clone(),
+            ),
+            (
+                MutationOperation::ApplyPatch,
+                serde_json::json!({"paseto": "changed"}),
+                params.clone(),
+            ),
+            (MutationOperation::ApplyPatch, authority.clone(), changed),
+        ] {
+            let live_temp = tempfile::tempdir().expect("tempdir");
+            let mut live = gateway(&live_temp, 200, false);
+            let permit = live
+                .authorize(
+                    MutationOperation::ApplyPatch,
+                    &authority,
+                    &params,
+                    &subject().attempt_id,
+                    subject().attempt_fence,
+                    &WRITER_NONCE,
+                )
+                .expect("permit");
+            let error = permit
+                .consume(operation, &presented_authority, &presented_params, 101)
+                .expect_err("changed after check");
+            assert_eq!(error.reason_code(), "AUTHORITY_SUBJECT_MISMATCH");
+        }
     }
 
     #[test]
@@ -356,6 +410,9 @@ mod tests {
             MutationOperation::ApplyPatch,
             &serde_json::json!({"paseto": "superseded"}),
             &serde_json::json!({"path": "src/lib.rs"}),
+            &subject().attempt_id,
+            subject().attempt_fence,
+            &WRITER_NONCE,
         ));
         assert_eq!(error.reason_code(), "AUTHORITY_REFUSED");
         assert_eq!(temp.path().read_dir().expect("ledger dir").count(), 0);
@@ -383,7 +440,49 @@ mod tests {
             MutationOperation::ApplyPatch,
             &serde_json::json!({"paseto": "fixture"}),
             &serde_json::json!({"path": "src/lib.rs"}),
+            &subject().attempt_id,
+            subject().attempt_fence,
+            &WRITER_NONCE,
         ));
         assert_eq!(error.reason_code(), "AUTHORITY_REFUSED");
+    }
+
+    #[test]
+    fn changed_writer_incarnation_creates_no_reservation_or_permit() {
+        for changed in [
+            MutationSubject {
+                attempt_id: format!("atm_{}", "6".repeat(64)),
+                ..subject()
+            },
+            MutationSubject {
+                attempt_fence: 11,
+                ..subject()
+            },
+            MutationSubject {
+                workspace_nonce: "6".repeat(64),
+                ..subject()
+            },
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let mut gateway = AuthorityGateway {
+                checker: Box::new(FixedCheck {
+                    subject: changed,
+                    expires_at_unix_ms: 200,
+                    mutate_fingerprint: false,
+                }),
+                clock: Box::new(FixedClock(100)),
+                ledger: Some(MutationLedger::open(temp.path()).expect("ledger")),
+            };
+            let error = refused(gateway.authorize(
+                MutationOperation::ApplyPatch,
+                &serde_json::json!({"paseto": "fixture"}),
+                &serde_json::json!({"path": "src/lib.rs"}),
+                &subject().attempt_id,
+                subject().attempt_fence,
+                &WRITER_NONCE,
+            ));
+            assert_eq!(error.reason_code(), "AUTHORITY_SUBJECT_MISMATCH");
+            assert_eq!(temp.path().read_dir().expect("ledger dir").count(), 0);
+        }
     }
 }

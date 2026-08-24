@@ -8,10 +8,21 @@ use bullet_gitd::protocol::MAX_FRAME_BYTES;
 
 fn subject() -> MutationSubject {
     MutationSubject {
+        authority_envelope_digest: "a".repeat(64),
+        authority_token_nonce: "b".repeat(64),
         mutation_id: format!("mut_{}", "1".repeat(64)),
         reservation_id: format!("rsv_{}", "2".repeat(64)),
         operation: MutationOperation::ApplyPatch,
         request_digest: "3".repeat(64),
+        repository_id: format!("rep_{}", "4".repeat(64)),
+        workspace_id: format!("wsp_{}", "5".repeat(64)),
+        workspace_generation: 6,
+        workspace_nonce: "7".repeat(64),
+        attempt_id: format!("atm_{}", "8".repeat(64)),
+        attempt_fence: 9,
+        authority_epoch: 10,
+        freeze_generation: 0,
+        permit_nonce: "c".repeat(64),
         permit_digest: "4".repeat(64),
     }
 }
@@ -51,6 +62,14 @@ fn subject_or_result_mutation_is_a_replay_conflict() {
 
     for changed in [
         MutationSubject {
+            authority_envelope_digest: "6".repeat(64),
+            ..exact.clone()
+        },
+        MutationSubject {
+            authority_token_nonce: "6".repeat(64),
+            ..exact.clone()
+        },
+        MutationSubject {
             reservation_id: format!("rsv_{}", "5".repeat(64)),
             ..exact.clone()
         },
@@ -60,6 +79,42 @@ fn subject_or_result_mutation_is_a_replay_conflict() {
         },
         MutationSubject {
             request_digest: "6".repeat(64),
+            ..exact.clone()
+        },
+        MutationSubject {
+            repository_id: format!("rep_{}", "6".repeat(64)),
+            ..exact.clone()
+        },
+        MutationSubject {
+            workspace_id: format!("wsp_{}", "6".repeat(64)),
+            ..exact.clone()
+        },
+        MutationSubject {
+            workspace_generation: 11,
+            ..exact.clone()
+        },
+        MutationSubject {
+            workspace_nonce: "6".repeat(64),
+            ..exact.clone()
+        },
+        MutationSubject {
+            attempt_id: format!("atm_{}", "6".repeat(64)),
+            ..exact.clone()
+        },
+        MutationSubject {
+            attempt_fence: 11,
+            ..exact.clone()
+        },
+        MutationSubject {
+            authority_epoch: 11,
+            ..exact.clone()
+        },
+        MutationSubject {
+            freeze_generation: 11,
+            ..exact.clone()
+        },
+        MutationSubject {
+            permit_nonce: "6".repeat(64),
             ..exact.clone()
         },
         MutationSubject {
@@ -115,6 +170,77 @@ fn partial_or_hostile_records_and_ids_fail_closed() {
     let error = ledger.reserve(&invalid).expect_err("invalid id");
     assert_eq!(error.reason_code(), "INVALID_MUTATION_SUBJECT");
     assert!(!temp.path().join("escape.jsonl").exists());
+}
+
+#[test]
+fn every_malformed_authority_subject_field_fails_before_reservation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let exact = subject();
+    let invalid = [
+        MutationSubject {
+            authority_envelope_digest: "not-a-digest".into(),
+            ..exact.clone()
+        },
+        MutationSubject {
+            authority_token_nonce: "not-a-nonce".into(),
+            ..exact.clone()
+        },
+        MutationSubject {
+            reservation_id: "rsv_../../escape".into(),
+            ..exact.clone()
+        },
+        MutationSubject {
+            request_digest: "not-a-digest".into(),
+            ..exact.clone()
+        },
+        MutationSubject {
+            repository_id: "rep_../../escape".into(),
+            ..exact.clone()
+        },
+        MutationSubject {
+            workspace_id: "wsp_../../escape".into(),
+            ..exact.clone()
+        },
+        MutationSubject {
+            workspace_generation: 0,
+            ..exact.clone()
+        },
+        MutationSubject {
+            workspace_nonce: "not-a-nonce".into(),
+            ..exact.clone()
+        },
+        MutationSubject {
+            attempt_id: "atm_../../escape".into(),
+            ..exact.clone()
+        },
+        MutationSubject {
+            attempt_fence: 0,
+            ..exact.clone()
+        },
+        MutationSubject {
+            authority_epoch: 9_007_199_254_740_992,
+            ..exact.clone()
+        },
+        MutationSubject {
+            freeze_generation: 9_007_199_254_740_992,
+            ..exact.clone()
+        },
+        MutationSubject {
+            permit_nonce: "not-a-nonce".into(),
+            ..exact.clone()
+        },
+        MutationSubject {
+            permit_digest: "not-a-digest".into(),
+            ..exact
+        },
+    ];
+
+    let mut ledger = MutationLedger::open(temp.path()).expect("open");
+    for changed in invalid {
+        let error = ledger.reserve(&changed).expect_err("invalid subject");
+        assert_eq!(error.reason_code(), "INVALID_MUTATION_SUBJECT");
+    }
+    assert_eq!(temp.path().read_dir().expect("ledger directory").count(), 0);
 }
 
 #[test]

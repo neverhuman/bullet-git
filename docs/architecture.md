@@ -65,16 +65,25 @@ tree.
   `4d7f21731983e855f07d4a5a8e97fd5d743a3dc7`. BulletGit must not copy the
   source, invent a tag, or enable a positive checker until an operator
   publishes the frozen contract and updates the verified lock.
-- **Durable replay prerequisite.** The local mutation ledger records one exact
-  Mutation/reservation/operation/request-digest plus the digest of its verified
-  signed permit in an append-only, fsynced JSONL file. The permit digest binds
-  the full signed repository, workspace-generation, Attempt/fence, epoch,
-  freeze, nonce, and envelope subject without duplicating unpublished wire
-  types. Exact terminal results replay without another
+- **Durable replay prerequisite.** The local mutation ledger records the exact
+  Mutation/reservation/operation/request digest, authority-envelope digest and
+  token nonce, repository, Workspace/generation/nonce, Attempt/fence,
+  authority epoch, freeze generation, permit nonce, and permit digest in an
+  append-only, fsynced JSONL file. These fields mirror the frozen permit
+  subject plus the workspace nonce from its verified authority envelope; a
+  future positive adapter must match both signed objects before constructing
+  the private daemon decision. The gateway also compares that decision's
+  Attempt, fence, and workspace nonce with the already-parsed writer target
+  before writing a reservation. The legacy request does not expose typed
+  repository/Workspace IDs or generation, so there is intentionally no
+  positive production path until the frozen typed request replaces it. Every
+  field is replay-sensitive and malformed IDs, digests, or generations are
+  refused before reservation. Exact terminal results replay without another
   reservation; changed subjects conflict. A restart with only an in-flight
   reservation, a partial write, or corrupt state is
   `MUTATION_OUTCOME_UNKNOWN`, never permission to retry. This ledger records
-  evidence only and cannot mint authority.
+  evidence only and cannot mint authority. The public daemon still has no
+  positive adapter.
 - **No remote, no credential.** `git remote remove origin` runs immediately
   after clone; `credential.helper=` is forced empty, `GIT_ASKPASS` points at
   a deny script, `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND=false`. A

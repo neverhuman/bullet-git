@@ -158,9 +158,17 @@ impl Daemon {
         &mut self,
         req: &Request,
         operation: MutationOperation,
+        token: &WireAuthorityToken,
     ) -> Result<MutationPermit, MethodError> {
         self.authority
-            .authorize(operation, &req.token, &req.params)
+            .authorize(
+                operation,
+                &req.token,
+                &req.params,
+                &token.attempt_id,
+                token.attempt_fence,
+                &token.workspace_nonce,
+            )
             .map_err(|error| gateway(&error))
     }
 
@@ -199,7 +207,7 @@ impl Daemon {
             created_at: &params.created_at,
             nonce: token.workspace_nonce,
         };
-        let permit = self.authorize_mutation(req, MutationOperation::CloneWorkspace)?;
+        let permit = self.authorize_mutation(req, MutationOperation::CloneWorkspace, &token)?;
         self.consume_permit(req, MutationOperation::CloneWorkspace, permit)?;
         let workspace = PrivateClone::create(&clone_req).map_err(|e| cap(&e))?;
         let grant = ScopeGrant::new(&params.allowed_prefixes).map_err(|e| cap(&e))?;
@@ -232,7 +240,7 @@ impl Daemon {
     }
 
     fn handle_repo(&mut self, req: &Request) -> MethodResult {
-        let _ = self.verify_token(req)?;
+        let token = self.verify_token(req)?;
         let envelope = protocol::envelope(&req.token);
         match req.method.as_str() {
             "read_tree" => {
@@ -246,7 +254,7 @@ impl Daemon {
                 for patch in params.patches {
                     patches.push(decode_patch(patch)?);
                 }
-                let permit = self.authorize_mutation(req, MutationOperation::ApplyPatch)?;
+                let permit = self.authorize_mutation(req, MutationOperation::ApplyPatch, &token)?;
                 self.consume_permit(req, MutationOperation::ApplyPatch, permit)?;
                 let session = self.session.as_mut().ok_or_else(not_cloned)?;
                 session
@@ -256,7 +264,7 @@ impl Daemon {
                 Ok(json!({ "applied": patches.len() }))
             }
             "checkpoint" => {
-                let permit = self.authorize_mutation(req, MutationOperation::Checkpoint)?;
+                let permit = self.authorize_mutation(req, MutationOperation::Checkpoint, &token)?;
                 self.consume_permit(req, MutationOperation::Checkpoint, permit)?;
                 let session = self.session.as_mut().ok_or_else(not_cloned)?;
                 let checkpoint = session.repo.checkpoint(&envelope).map_err(|e| cap(&e))?;
@@ -269,7 +277,8 @@ impl Daemon {
                     mission: params.mission.clone(),
                     acceptance_root: Digest::of(params.mission.as_bytes()),
                 };
-                let permit = self.authorize_mutation(req, MutationOperation::PrepareCandidate)?;
+                let permit =
+                    self.authorize_mutation(req, MutationOperation::PrepareCandidate, &token)?;
                 self.consume_permit(req, MutationOperation::PrepareCandidate, permit)?;
                 let session = self.session.as_mut().ok_or_else(not_cloned)?;
                 let candidate = session
@@ -283,9 +292,9 @@ impl Daemon {
     }
 
     fn handle_preserve(&mut self, req: &Request) -> MethodResult {
-        let _ = self.verify_token(req)?;
+        let token = self.verify_token(req)?;
         let params: PreserveParams = parse_params(&req.params)?;
-        let permit = self.authorize_mutation(req, MutationOperation::PreserveWorkspace)?;
+        let permit = self.authorize_mutation(req, MutationOperation::PreserveWorkspace, &token)?;
         self.consume_permit(req, MutationOperation::PreserveWorkspace, permit)?;
         let envelope = protocol::envelope(&req.token);
         let session = self.session.as_ref().ok_or_else(not_cloned)?;
@@ -302,9 +311,9 @@ impl Daemon {
     }
 
     fn handle_cleanup(&mut self, req: &Request) -> MethodResult {
-        let _ = self.verify_token(req)?;
+        let token = self.verify_token(req)?;
         let params: CleanupParams = parse_params(&req.params)?;
-        let permit = self.authorize_mutation(req, MutationOperation::CleanupWorkspace)?;
+        let permit = self.authorize_mutation(req, MutationOperation::CleanupWorkspace, &token)?;
         self.consume_permit(req, MutationOperation::CleanupWorkspace, permit)?;
         let envelope = protocol::envelope(&req.token);
         let session = self.session.as_mut().ok_or_else(not_cloned)?;

@@ -52,6 +52,10 @@ impl MutationOperation {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MutationSubject {
+    /// Digest of the exact signed authority envelope checked by Kernel.
+    pub authority_envelope_digest: String,
+    /// Nonce of the exact authority token checked by Kernel.
+    pub authority_token_nonce: String,
     /// Full 256-bit Mutation identity.
     pub mutation_id: String,
     /// Full 256-bit reservation identity.
@@ -60,15 +64,48 @@ pub struct MutationSubject {
     pub operation: MutationOperation,
     /// Frozen request digest from the shared contract.
     pub request_digest: String,
+    /// Repository named by the verified authority and typed request.
+    pub repository_id: String,
+    /// Workspace named by the verified authority and typed request.
+    pub workspace_id: String,
+    /// Exact active workspace generation.
+    pub workspace_generation: u64,
+    /// Workspace nonce from the verified authority claims.
+    pub workspace_nonce: String,
+    /// Attempt incarnation named by the verified authority.
+    pub attempt_id: String,
+    /// Permanent, never-reused Attempt fence.
+    pub attempt_fence: u64,
+    /// Revocation epoch observed by the online final check.
+    pub authority_epoch: u64,
+    /// Freeze generation observed by the online final check.
+    pub freeze_generation: u64,
+    /// Nonce of the signed one-use mutation permit.
+    pub permit_nonce: String,
     /// Digest of the verified signed permit, binding every permit claim.
     pub permit_digest: String,
 }
 
 impl MutationSubject {
     fn validate(&self) -> Result<(), MutationLedgerError> {
+        validate_digest(&self.authority_envelope_digest)?;
+        validate_digest(&self.authority_token_nonce)?;
         validate_id(&self.mutation_id, "mut_")?;
         validate_id(&self.reservation_id, "rsv_")?;
         validate_digest(&self.request_digest)?;
+        validate_id(&self.repository_id, "rep_")?;
+        validate_id(&self.workspace_id, "wsp_")?;
+        validate_positive_generation(self.workspace_generation, "workspace_generation")?;
+        validate_digest(&self.workspace_nonce)?;
+        validate_id(&self.attempt_id, "atm_")?;
+        validate_positive_generation(self.attempt_fence, "attempt_fence")?;
+        validate_positive_generation(self.authority_epoch, "authority_epoch")?;
+        if self.freeze_generation > MAX_SAFE_INTEGER {
+            return Err(MutationLedgerError::InvalidSubject(
+                "freeze_generation exceeds the interoperable integer range".into(),
+            ));
+        }
+        validate_digest(&self.permit_nonce)?;
         validate_digest(&self.permit_digest)
     }
 }
@@ -104,7 +141,7 @@ pub enum ReplayDisposition {
     /// This process durably created the reservation.
     Fresh,
     /// An identical terminal result already exists.
-    ExactReplay(MutationResult),
+    ExactReplay(Box<MutationResult>),
 }
 
 /// Fail-closed ledger error with a stable reason code.
@@ -217,7 +254,7 @@ impl MutationLedger {
                             subject.mutation_id
                         )))
                     },
-                    |result| Ok(ReplayDisposition::ExactReplay(result)),
+                    |result| Ok(ReplayDisposition::ExactReplay(Box::new(result))),
                 )
             }
             Err(error) => Err(io_error(error)),
@@ -251,7 +288,7 @@ impl MutationLedger {
         };
         if let Some(existing) = state.result {
             if existing == requested {
-                return Ok(ReplayDisposition::ExactReplay(existing));
+                return Ok(ReplayDisposition::ExactReplay(Box::new(existing)));
             }
             return Err(MutationLedgerError::ReplayConflict(format!(
                 "{} already has a different terminal result",
@@ -413,6 +450,15 @@ fn validate_digest(value: &str) -> Result<(), MutationLedgerError> {
             "digest must contain 64 lowercase hexadecimal characters".into(),
         ))
     }
+}
+
+fn validate_positive_generation(value: u64, name: &str) -> Result<(), MutationLedgerError> {
+    if value == 0 || value > MAX_SAFE_INTEGER {
+        return Err(MutationLedgerError::InvalidSubject(format!(
+            "{name} must be a positive interoperable integer"
+        )));
+    }
+    Ok(())
 }
 
 fn is_lower_hex(value: &str) -> bool {
