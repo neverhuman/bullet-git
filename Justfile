@@ -10,3 +10,9 @@ fast:
 
 check:
     bash scripts/ci-local.sh required
+
+contract:
+    bash scripts/ci-local.sh contract
+
+security:
+    bash scripts/ci-local.sh security

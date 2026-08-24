@@ -5,9 +5,21 @@
       "command": "cargo test --workspace",
       "purpose": "prove Change/Candidate, capability API, journal, and proof roots"
     },
+    "crates/bullet-git-workspace/": {
+      "command": "cargo test -p bullet-git-workspace",
+      "purpose": "prove SafeGit isolation, private clone lifecycle, scope enforcement, and receipt-gated cleanup against real Git fixtures"
+    },
+    "crates/bullet-gitd/": {
+      "command": "cargo test -p bullet-gitd",
+      "purpose": "prove authority verification and the stdio protocol round trip against the built daemon binary"
+    },
     "ops/": {
-      "command": "just fast",
+      "command": "just check",
       "purpose": "verify local CI parity"
+    },
+    ".github/": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "prove hosted lanes match local scripts"
     }
   }
 }

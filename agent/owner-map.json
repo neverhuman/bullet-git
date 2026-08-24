@@ -11,6 +11,8 @@
     "crates/": "git",
     "docs/": "docs",
     "ops/": "ops",
-    "scripts/": "ops"
+    "scripts/": "ops",
+    ".github/": "ops",
+    ".config/": "ops"
   }
 }

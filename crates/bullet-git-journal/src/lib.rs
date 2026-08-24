@@ -1,6 +1,6 @@
 //! Append-only workspace journal. Uncommitted work is recoverable state.
 
-use bullet_git_types::{CheckpointId, Digest};
+use bullet_git_types::{frame, CheckpointId, Digest, GitOid};
 use serde::{Deserialize, Serialize};
 
 /// One filesystem mutation.
@@ -21,8 +21,10 @@ pub struct Checkpoint {
     pub id: CheckpointId,
     /// Inclusive op range end.
     pub through_seq: u64,
-    /// Tree digest.
+    /// Journal tree digest over all framed ops.
     pub tree: Digest,
+    /// Exact Git tree of the working copy, when a real repository backs it.
+    pub git_tree: Option<GitOid>,
 }
 
 /// In-memory journal.
@@ -49,18 +51,23 @@ impl Journal {
     }
 
     /// Freeze a checkpoint at the current head.
+    ///
+    /// Every op field is length-prefix framed, so op boundaries never collide.
     #[must_use]
     pub fn checkpoint(&self) -> Checkpoint {
         let through_seq = self.ops.last().map_or(0, |op| op.seq);
         let mut buf = Vec::new();
         for op in &self.ops {
-            buf.extend_from_slice(op.path.as_bytes());
-            buf.extend_from_slice(op.after.to_hex().as_bytes());
+            frame(&mut buf, &op.seq.to_le_bytes());
+            frame(&mut buf, op.path.as_bytes());
+            frame(&mut buf, op.after.as_bytes());
         }
+        let tree = Digest::of(&buf);
         Checkpoint {
-            id: CheckpointId::from_seed(&through_seq.to_string()),
+            id: CheckpointId::from_seed(&format!("{through_seq}:{}", tree.to_hex())),
             through_seq,
-            tree: Digest::of(&buf),
+            tree,
+            git_tree: None,
         }
     }
 
@@ -83,5 +90,15 @@ mod tests {
         let ck = journal.checkpoint();
         assert_eq!(ck.through_seq, 2);
         assert_eq!(journal.ops().len(), 2);
+        assert_eq!(ck.git_tree, None);
+    }
+
+    #[test]
+    fn checkpoint_preimage_is_framed() {
+        let mut ab = Journal::new();
+        ab.record("ab", b"");
+        let mut a = Journal::new();
+        a.record("a", b"b");
+        assert_ne!(ab.checkpoint().tree, a.checkpoint().tree);
     }
 }

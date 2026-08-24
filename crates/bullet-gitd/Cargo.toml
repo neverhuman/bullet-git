@@ -11,5 +11,11 @@ workspace = true
 [dependencies]
 bullet-git-types.workspace = true
 bullet-git-journal.workspace = true
+bullet-git-workspace.workspace = true
+hex.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,107 +1,76 @@
-//! Capability-secure repository API. Agents do not receive a Git binary.
+//! bullet-gitd: capability-secure repository daemon. Agents do not receive a
+//! Git binary; every mutation carries an AuthorityToken and is verified here.
+
+pub mod daemon;
+pub mod protocol;
 
 use bullet_git_journal::{Checkpoint, Journal};
 use bullet_git_types::{
-    AuthorityEnvelope, Candidate, CandidateId, Change, Digest, EvolutionEdge, EvolutionKind,
-    GitOid, ProofRoot,
+    frame, framed_digest, AuthorityEnvelope, Candidate, CandidateId, Change, Digest, EvolutionEdge,
+    EvolutionKind, GitOid, ProofRoot,
 };
-use thiserror::Error;
+use bullet_git_workspace::{
+    AgentRepository, CapabilityError, ExpectedAuthority, PatchHunk, ScopeGrant,
+};
 
-/// Capability error.
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum CapabilityError {
-    /// Missing or empty authority envelope.
-    #[error("authority required")]
-    Unauthorized,
-    /// Path is outside the granted scope.
-    #[error("path out of scope: {0}")]
-    OutOfScope(String),
-    /// Workspace is a Git worktree.
-    #[error("writable worktrees are forbidden")]
-    WorktreeForbidden,
+fn synth_oid(fields: &[&[u8]]) -> GitOid {
+    let hex = framed_digest(fields).to_hex();
+    GitOid::new(&hex[..40]).expect("40 hex chars from a 64-char digest")
 }
 
-/// One file patch.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PatchHunk {
-    /// Relative path.
-    pub path: String,
-    /// Replacement bytes.
-    pub contents: Vec<u8>,
-}
-
-/// Agent-facing repository capability.
-pub trait AgentRepository {
-    /// Read a tree listing.
-    ///
-    /// # Errors
-    ///
-    /// Returns unauthorized when the envelope is empty.
-    fn read_tree(&self, auth: &AuthorityEnvelope) -> Result<Vec<String>, CapabilityError>;
-
-    /// Apply a scoped patch.
-    ///
-    /// # Errors
-    ///
-    /// Returns unauthorized or out-of-scope.
-    fn apply_change(
-        &mut self,
-        auth: &AuthorityEnvelope,
-        patches: &[PatchHunk],
-    ) -> Result<(), CapabilityError>;
-
-    /// Checkpoint the journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns unauthorized when the envelope is empty.
-    fn checkpoint(&mut self, auth: &AuthorityEnvelope) -> Result<Checkpoint, CapabilityError>;
-
-    /// Prepare an exact Candidate from the current tree.
-    ///
-    /// # Errors
-    ///
-    /// Returns unauthorized when the envelope is empty.
-    fn prepare_candidate(
-        &mut self,
-        auth: &AuthorityEnvelope,
-        change: &Change,
-    ) -> Result<Candidate, CapabilityError>;
-}
-
-/// In-process fake used until jeryu-gitd capability sessions land.
-#[derive(Default)]
+/// In-process fake enforcing the same authority and scope rules as
+/// `RealRepository`, for unit tests without a Git binary.
 pub struct MemoryRepository {
     files: Vec<(String, Vec<u8>)>,
     journal: Journal,
+    expected: ExpectedAuthority,
+    grant: ScopeGrant,
+    base: GitOid,
     is_worktree: bool,
 }
 
 impl MemoryRepository {
-    /// Empty private clone.
+    /// Empty private clone bound to expected authority and a scope grant.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(expected: ExpectedAuthority, grant: ScopeGrant) -> Self {
+        Self {
+            files: Vec::new(),
+            journal: Journal::new(),
+            expected,
+            grant,
+            base: synth_oid(&[b"memory.base"]),
+            is_worktree: false,
+        }
     }
 
     /// Mark the workspace as a worktree so writes fail closed.
     #[must_use]
-    pub fn worktree() -> Self {
+    pub fn worktree(expected: ExpectedAuthority, grant: ScopeGrant) -> Self {
         Self {
             is_worktree: true,
-            ..Self::default()
+            ..Self::new(expected, grant)
         }
     }
 
-    /// Record a typed evolution edge.
+    /// Record a typed evolution edge. The ChangeId survives; the CandidateId
+    /// never does.
     #[must_use]
     pub fn evolve(from: &Candidate, kind: EvolutionKind, seed: &str) -> (Candidate, EvolutionEdge) {
+        let tree = synth_oid(&[b"memory.tree", seed.as_bytes()]);
+        let head = synth_oid(&[b"memory.head", seed.as_bytes(), tree.as_str().as_bytes()]);
         let next = Candidate {
-            id: CandidateId::from_seed(seed),
+            id: CandidateId::from_content(&from.change, &tree, &head),
             change: from.change.clone(),
-            git_commit: GitOid(format!("git-{seed}")),
-            tree: from.tree.clone(),
-            patch_digest: Digest::of(seed.as_bytes()),
+            base_commit: from.base_commit.clone(),
+            head_commit: head,
+            tree_hash: tree,
+            patch_hash: Digest::of(seed.as_bytes()),
+            variant_id: from.variant_id.clone(),
+            attempt_id: from.attempt_id.clone(),
+            granted_scope: from.granted_scope.clone(),
+            actual_scope: from.actual_scope.clone(),
+            parent_candidate_id: Some(from.id.clone()),
+            prepared_at: from.prepared_at.clone(),
         };
         let edge = EvolutionEdge {
             from: from.id.clone(),
@@ -112,17 +81,9 @@ impl MemoryRepository {
     }
 }
 
-fn require(auth: &AuthorityEnvelope) -> Result<(), CapabilityError> {
-    if auth.is_present() {
-        Ok(())
-    } else {
-        Err(CapabilityError::Unauthorized)
-    }
-}
-
 impl AgentRepository for MemoryRepository {
     fn read_tree(&self, auth: &AuthorityEnvelope) -> Result<Vec<String>, CapabilityError> {
-        require(auth)?;
+        self.expected.require(auth)?;
         Ok(self.files.iter().map(|(p, _)| p.clone()).collect())
     }
 
@@ -131,27 +92,27 @@ impl AgentRepository for MemoryRepository {
         auth: &AuthorityEnvelope,
         patches: &[PatchHunk],
     ) -> Result<(), CapabilityError> {
-        require(auth)?;
+        self.expected.require(auth)?;
         if self.is_worktree {
-            return Err(CapabilityError::WorktreeForbidden);
+            return Err(CapabilityError::WorktreeForbidden("memory".into()));
         }
+        let mut normalized = Vec::with_capacity(patches.len());
         for patch in patches {
-            if patch.path.starts_with('/') || patch.path.contains("..") {
-                return Err(CapabilityError::OutOfScope(patch.path.clone()));
-            }
-            self.journal.record(&patch.path, &patch.contents);
-            if let Some((_, existing)) = self.files.iter_mut().find(|(p, _)| p == &patch.path) {
+            normalized.push(self.grant.check(&patch.path)?);
+        }
+        for (patch, path) in patches.iter().zip(normalized) {
+            self.journal.record(&path, &patch.contents);
+            if let Some((_, existing)) = self.files.iter_mut().find(|(p, _)| p == &path) {
                 *existing = patch.contents.clone();
             } else {
-                self.files
-                    .push((patch.path.clone(), patch.contents.clone()));
+                self.files.push((path, patch.contents.clone()));
             }
         }
         Ok(())
     }
 
     fn checkpoint(&mut self, auth: &AuthorityEnvelope) -> Result<Checkpoint, CapabilityError> {
-        require(auth)?;
+        self.expected.require(auth)?;
         Ok(self.journal.checkpoint())
     }
 
@@ -160,18 +121,36 @@ impl AgentRepository for MemoryRepository {
         auth: &AuthorityEnvelope,
         change: &Change,
     ) -> Result<Candidate, CapabilityError> {
-        require(auth)?;
-        let mut blob = Vec::new();
-        for (path, bytes) in &self.files {
-            blob.extend_from_slice(path.as_bytes());
-            blob.extend_from_slice(bytes);
+        self.expected.require(auth)?;
+        let mut files = self.files.clone();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut buf = Vec::new();
+        frame(&mut buf, b"memory.candidate.v1");
+        for (path, bytes) in &files {
+            frame(&mut buf, path.as_bytes());
+            frame(&mut buf, bytes);
         }
+        let content = Digest::of(&buf);
+        let tree = synth_oid(&[b"memory.tree", content.as_bytes()]);
+        let head = synth_oid(&[
+            b"memory.head",
+            tree.as_str().as_bytes(),
+            self.base.as_str().as_bytes(),
+            change.id.as_str().as_bytes(),
+        ]);
         Ok(Candidate {
-            id: CandidateId::from_seed(&change.id.to_string()),
+            id: CandidateId::from_content(&change.id, &tree, &head),
             change: change.id.clone(),
-            git_commit: GitOid(Digest::of(&blob).to_hex()),
-            tree: GitOid(Digest::of(&blob).to_hex()),
-            patch_digest: Digest::of(&blob),
+            base_commit: self.base.clone(),
+            head_commit: head,
+            tree_hash: tree,
+            patch_hash: content,
+            variant_id: "memory".into(),
+            attempt_id: self.expected.attempt_id.clone(),
+            granted_scope: self.grant.allowed_prefixes.clone(),
+            actual_scope: files.iter().map(|(p, _)| p.clone()).collect(),
+            parent_candidate_id: None,
+            prepared_at: "memory".into(),
         })
     }
 }
@@ -185,39 +164,136 @@ pub fn bind_proof(candidate: &Candidate) -> ProofRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bullet_git_types::ChangeId;
+
+    fn expected() -> ExpectedAuthority {
+        ExpectedAuthority {
+            attempt_id: "atm_1".into(),
+            attempt_fence: 3,
+            workspace_nonce: [7u8; 32],
+        }
+    }
+
+    fn token(attempt: &str, fence: u64) -> AuthorityEnvelope {
+        let nonce: Vec<u8> = vec![7u8; 32];
+        AuthorityEnvelope {
+            token: serde_json::to_vec(&serde_json::json!({
+                "variant_id": "var_1",
+                "attempt_id": attempt,
+                "attempt_fence": fence,
+                "workspace_nonce": nonce,
+            }))
+            .expect("token json"),
+        }
+    }
+
+    fn grant() -> ScopeGrant {
+        ScopeGrant::new(&["src".into()]).expect("grant")
+    }
+
+    fn change() -> Change {
+        Change {
+            id: ChangeId::from_seed("feat"),
+            mission: "demo".into(),
+            acceptance_root: Digest::of(b"acc"),
+        }
+    }
 
     #[test]
-    fn empty_token_is_rejected() {
-        let repo = MemoryRepository::new();
-        let auth = AuthorityEnvelope { token: vec![] };
-        assert_eq!(repo.read_tree(&auth), Err(CapabilityError::Unauthorized));
+    fn empty_and_garbage_tokens_are_rejected() {
+        let repo = MemoryRepository::new(expected(), grant());
+        for bytes in [Vec::new(), b"x".to_vec()] {
+            let auth = AuthorityEnvelope { token: bytes };
+            let err = repo.read_tree(&auth).expect_err("rejected");
+            assert_eq!(err.reason_code(), "UNAUTHORIZED");
+        }
+    }
+
+    #[test]
+    fn wrong_fence_token_is_stale() {
+        let repo = MemoryRepository::new(expected(), grant());
+        let err = repo.read_tree(&token("atm_1", 4)).expect_err("stale");
+        assert_eq!(err.reason_code(), "STALE_AUTHORITY");
     }
 
     #[test]
     fn worktree_writes_are_blocked() {
-        let mut repo = MemoryRepository::worktree();
-        let auth = AuthorityEnvelope {
-            token: b"token".to_vec(),
-        };
+        let mut repo = MemoryRepository::worktree(expected(), grant());
         let err = repo
             .apply_change(
-                &auth,
+                &token("atm_1", 3),
                 &[PatchHunk {
                     path: "src/lib.rs".into(),
                     contents: b"x".to_vec(),
                 }],
             )
             .expect_err("blocked");
-        assert_eq!(err, CapabilityError::WorktreeForbidden);
+        assert_eq!(err.reason_code(), "WORKTREE_FORBIDDEN");
     }
 
     #[test]
-    fn prepare_candidate_and_proof() {
-        use bullet_git_types::ChangeId;
-        let mut repo = MemoryRepository::new();
-        let auth = AuthorityEnvelope {
-            token: b"token".to_vec(),
+    fn out_of_scope_patch_leaves_tree_untouched() {
+        let mut repo = MemoryRepository::new(expected(), grant());
+        let auth = token("atm_1", 3);
+        let err = repo
+            .apply_change(
+                &auth,
+                &[
+                    PatchHunk {
+                        path: "src/ok.rs".into(),
+                        contents: b"fine".to_vec(),
+                    },
+                    PatchHunk {
+                        path: "../escape".into(),
+                        contents: b"evil".to_vec(),
+                    },
+                ],
+            )
+            .expect_err("refused");
+        assert_eq!(err.reason_code(), "OUT_OF_SCOPE");
+        assert!(err.to_string().contains("../escape"));
+        assert!(repo.read_tree(&auth).expect("read").is_empty());
+    }
+
+    #[test]
+    fn candidate_id_ignores_application_order_but_tracks_content() {
+        let auth = token("atm_1", 3);
+        let a = PatchHunk {
+            path: "src/a.rs".into(),
+            contents: b"alpha".to_vec(),
         };
+        let b = PatchHunk {
+            path: "src/b.rs".into(),
+            contents: b"beta".to_vec(),
+        };
+        let mut one = MemoryRepository::new(expected(), grant());
+        one.apply_change(&auth, &[a.clone(), b.clone()])
+            .expect("apply");
+        let mut two = MemoryRepository::new(expected(), grant());
+        two.apply_change(&auth, &[b, a]).expect("apply");
+        let c1 = one.prepare_candidate(&auth, &change()).expect("prepare");
+        let c2 = two.prepare_candidate(&auth, &change()).expect("prepare");
+        assert_eq!(c1.id, c2.id);
+        assert_eq!(c1.tree_hash, c2.tree_hash);
+        assert_eq!(c1.patch_hash, c2.patch_hash);
+        let mut three = MemoryRepository::new(expected(), grant());
+        three
+            .apply_change(
+                &auth,
+                &[PatchHunk {
+                    path: "src/a.rs".into(),
+                    contents: b"different".to_vec(),
+                }],
+            )
+            .expect("apply");
+        let c3 = three.prepare_candidate(&auth, &change()).expect("prepare");
+        assert_ne!(c1.id, c3.id);
+    }
+
+    #[test]
+    fn evolution_produces_new_candidate_and_proof_binds() {
+        let auth = token("atm_1", 3);
+        let mut repo = MemoryRepository::new(expected(), grant());
         repo.apply_change(
             &auth,
             &[PatchHunk {
@@ -225,19 +301,16 @@ mod tests {
                 contents: b"fn main() {}".to_vec(),
             }],
         )
-        .expect("patch");
-        let _ = repo.checkpoint(&auth).expect("checkpoint");
-        let change = Change {
-            id: ChangeId::from_seed("feat"),
-            mission: "demo".into(),
-            acceptance_root: Digest::of(b"acc"),
-        };
-        let candidate = repo.prepare_candidate(&auth, &change).expect("candidate");
+        .expect("apply");
+        let checkpoint = repo.checkpoint(&auth).expect("checkpoint");
+        assert_eq!(checkpoint.through_seq, 1);
+        let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
         let proof = bind_proof(&candidate);
         assert_eq!(proof.candidate, candidate.id);
         let (repaired, edge) = MemoryRepository::evolve(&candidate, EvolutionKind::Repair, "r1");
         assert_eq!(edge.kind, EvolutionKind::Repair);
         assert_ne!(repaired.id, candidate.id);
         assert_eq!(repaired.change, candidate.change);
+        assert_eq!(repaired.parent_candidate_id, Some(candidate.id));
     }
 }

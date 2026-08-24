@@ -1,11 +1,45 @@
 //! Change and Candidate identities. A ChangeId never authorizes integration.
 
-use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter};
+mod authority;
+mod change;
+mod ids;
 
-/// Digest of a proof-carrying object.
+pub use authority::{AuthorityEnvelope, AuthorityError, WireAuthorityToken};
+pub use change::{Candidate, Change, EvolutionEdge, EvolutionKind, ProofRoot};
+pub use ids::{CandidateId, ChangeId, CheckpointId, GitOid};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Typed identity/encoding error with stable reason codes.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum TypesError {
+    /// An identifier was missing its prefix or 32-hex body.
+    #[error("invalid id: {0}")]
+    InvalidId(String),
+    /// A Git object id was not 40 lowercase hex characters.
+    #[error("invalid git oid: {0}")]
+    InvalidOid(String),
+    /// A hex digest failed to decode into 32 bytes.
+    #[error("invalid digest encoding: {0}")]
+    Encoding(String),
+}
+
+impl TypesError {
+    /// Stable machine-readable reason code.
+    #[must_use]
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::InvalidId(_) => "INVALID_ID",
+            Self::InvalidOid(_) => "INVALID_OID",
+            Self::Encoding(_) => "ENCODING",
+        }
+    }
+}
+
+/// Digest of a proof-carrying object. Serializes as a 64-char hex string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Digest([u8; 32]);
+pub struct Digest(#[serde(with = "hex_bytes")] [u8; 32]);
 
 impl Digest {
     /// Hash bytes with BLAKE3.
@@ -19,152 +53,62 @@ impl Digest {
     pub fn to_hex(self) -> String {
         hex::encode(self.0)
     }
-}
 
-macro_rules! typed_id {
-    ($name:ident, $prefix:literal) => {
-        #[doc = concat!("Typed `", $prefix, "` identifier.")]
-        #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        pub struct $name(String);
-
-        impl $name {
-            /// Deterministic id from a seed.
-            #[must_use]
-            pub fn from_seed(seed: &str) -> Self {
-                let digest = Digest::of(format!("{}:{seed}", $prefix).as_bytes());
-                Self(format!("{}_{}", $prefix, &digest.to_hex()[..32]))
-            }
-
-            /// Borrow the prefixed string.
-            #[must_use]
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl Display for $name {
-            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-                f.write_str(&self.0)
-            }
-        }
-    };
-}
-
-typed_id!(ChangeId, "chg");
-typed_id!(CandidateId, "can");
-typed_id!(CheckpointId, "ckp");
-
-/// Exported ordinary Git object id.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GitOid(pub String);
-
-/// How one Candidate became another.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvolutionKind {
-    /// Amend in place conceptually; still a new Candidate.
-    Amend,
-    /// Repair after verifier failure.
-    Repair,
-    /// Rebase onto a new base. Proof is invalidated.
-    Rebase,
-    /// Squash.
-    Squash,
-    /// Split.
-    Split,
-    /// Synthesis from other Candidates.
-    Synthesis,
-    /// Cherry-pick.
-    CherryPick,
-    /// Merge-group composition.
-    MergeComposition,
-}
-
-/// One typed evolution edge. The ChangeId may survive; the CandidateId never does.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvolutionEdge {
-    /// Predecessor.
-    pub from: CandidateId,
-    /// Successor.
-    pub to: CandidateId,
-    /// Kind.
-    pub kind: EvolutionKind,
-}
-
-/// Logical change.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Change {
-    /// Stable intention.
-    pub id: ChangeId,
-    /// Mission seed or id.
-    pub mission: String,
-    /// Acceptance digest.
-    pub acceptance_root: Digest,
-}
-
-/// Exact implementation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Candidate {
-    /// Exact identity.
-    pub id: CandidateId,
-    /// Parent change.
-    pub change: ChangeId,
-    /// Exported Git commit.
-    pub git_commit: GitOid,
-    /// Tree.
-    pub tree: GitOid,
-    /// Patch digest.
-    pub patch_digest: Digest,
-}
-
-/// Merkle binding of proof claims to an exact Candidate.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProofRoot {
-    /// Subject.
-    pub candidate: CandidateId,
-    /// Bound digest.
-    pub root: Digest,
-}
-
-impl ProofRoot {
-    /// Compute a proof root. Empty fields still bind the subject.
+    /// Raw bytes.
     #[must_use]
-    pub fn compute(
-        candidate: &Candidate,
-        scope: &[u8],
-        evidence: &[u8],
-        reviews: &[u8],
-        policy: &[u8],
-    ) -> Self {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(candidate.id.as_str().as_bytes());
-        buf.extend_from_slice(candidate.git_commit.0.as_bytes());
-        buf.extend_from_slice(candidate.tree.0.as_bytes());
-        buf.extend_from_slice(&candidate.patch_digest.0);
-        buf.extend_from_slice(scope);
-        buf.extend_from_slice(evidence);
-        buf.extend_from_slice(reviews);
-        buf.extend_from_slice(policy);
-        Self {
-            candidate: candidate.id.clone(),
-            root: Digest::of(&buf),
-        }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Parse a 64-character hex digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TypesError::Encoding` when the text is not 32 bytes of hex.
+    pub fn from_hex(text: &str) -> Result<Self, TypesError> {
+        let raw = hex::decode(text).map_err(|err| TypesError::Encoding(err.to_string()))?;
+        let bytes: [u8; 32] = raw
+            .try_into()
+            .map_err(|_| TypesError::Encoding("digest must be 32 bytes".into()))?;
+        Ok(Self(bytes))
     }
 }
 
-/// Opaque authority envelope supplied by Bullet Farm.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthorityEnvelope {
-    /// Raw token bytes (JSON of AuthorityToken).
-    pub token: Vec<u8>,
+mod hex_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8; 32], ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[u8; 32], D::Error> {
+        let text = String::deserialize(de)?;
+        let raw = hex::decode(&text).map_err(serde::de::Error::custom)?;
+        let slice: [u8; 32] = raw
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("digest must be 32 bytes"))?;
+        Ok(slice)
+    }
 }
 
-impl AuthorityEnvelope {
-    /// Reject an empty envelope.
-    #[must_use]
-    pub fn is_present(&self) -> bool {
-        !self.token.is_empty()
+/// Length-prefix framing for multi-field hash preimages: u64 LE length, then bytes.
+///
+/// Every digest over more than one variable-length field MUST frame each field
+/// so that field boundaries are unambiguous (`["ab","c"]` never collides with
+/// `["a","bc"]`).
+pub fn frame(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+/// Digest of a sequence of framed fields.
+#[must_use]
+pub fn framed_digest(fields: &[&[u8]]) -> Digest {
+    let mut buf = Vec::new();
+    for field in fields {
+        frame(&mut buf, field);
     }
+    Digest::of(&buf)
 }
 
 #[cfg(test)]
@@ -172,29 +116,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn change_id_is_not_candidate_id() {
-        let change = ChangeId::from_seed("auth");
-        let candidate = CandidateId::from_seed("auth");
-        assert!(change.as_str().starts_with("chg_"));
-        assert!(candidate.as_str().starts_with("can_"));
-        assert_ne!(change.as_str(), candidate.as_str());
+    fn framing_disambiguates_field_boundaries() {
+        let a = framed_digest(&[b"ab", b"c"]);
+        let b = framed_digest(&[b"a", b"bc"]);
+        assert_ne!(a, b);
+        assert_ne!(framed_digest(&[b"abc"]), framed_digest(&[b"ab", b"c"]));
     }
 
     #[test]
-    fn proof_root_changes_when_candidate_changes() {
-        let change = ChangeId::from_seed("c");
-        let a = Candidate {
-            id: CandidateId::from_seed("c1"),
-            change: change.clone(),
-            git_commit: GitOid("aaa".into()),
-            tree: GitOid("t1".into()),
-            patch_digest: Digest::of(b"p1"),
-        };
-        let mut b = a.clone();
-        b.id = CandidateId::from_seed("c2");
-        b.git_commit = GitOid("bbb".into());
-        let ra = ProofRoot::compute(&a, b"", b"", b"", b"");
-        let rb = ProofRoot::compute(&b, b"", b"", b"", b"");
-        assert_ne!(ra.root, rb.root);
+    fn digest_hex_serde_round_trip() {
+        let digest = Digest::of(b"payload");
+        let json = serde_json::to_string(&digest).expect("serialize");
+        assert_eq!(json, format!("\"{}\"", digest.to_hex()));
+        let back: Digest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, digest);
+        assert_eq!(Digest::from_hex(&digest.to_hex()).expect("hex"), digest);
+    }
+
+    #[test]
+    fn digest_from_hex_rejects_bad_input() {
+        assert_eq!(
+            Digest::from_hex("zz").expect_err("reject").reason_code(),
+            "ENCODING"
+        );
+        assert_eq!(
+            Digest::from_hex("ab").expect_err("reject").reason_code(),
+            "ENCODING"
+        );
     }
 }
