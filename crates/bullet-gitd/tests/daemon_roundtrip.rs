@@ -1,5 +1,7 @@
-//! Full stdio conversation against the built bullet-gitd binary, spawned in a
-//! hostile environment (poisoned HOME, GIT_* variables) that it must ignore.
+//! Production-binary negatives for the fail-closed stdio boundary.
+//!
+//! The frozen authority contract is not yet available from an immutable
+//! permitted dependency, so no self-authored JSON token may reach a mutation.
 
 use bullet_gitd::protocol::MAX_FRAME_BYTES;
 use serde_json::{json, Value};
@@ -8,65 +10,13 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 const NONCE: [u8; 32] = [3u8; 32];
-const ATTEMPT: &str = "atm_roundtrip1";
-const FENCE: u64 = 7;
 
-fn fixture_git(home: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").expect("PATH"))
-        .env("HOME", home)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_AUTHOR_DATE", "2026-08-20T00:00:00+00:00")
-        .env("GIT_COMMITTER_DATE", "2026-08-20T00:00:00+00:00")
-        .args(args)
-        .output()
-        .expect("spawn fixture git");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
-fn init_source(root: &Path) -> (String, String) {
-    let home = root.join("fixture-home");
-    std::fs::create_dir_all(&home).expect("home");
-    let src = root.join("source");
-    std::fs::create_dir_all(&src).expect("src");
-    let src_str = src.to_string_lossy().into_owned();
-    fixture_git(&home, &["init", "-q", "-b", "main", &src_str]);
-    std::fs::write(src.join("README.md"), "seed\n").expect("seed");
-    std::fs::create_dir_all(src.join("src")).expect("src dir");
-    std::fs::write(src.join("src").join("seed.rs"), "pub fn seed() {}\n").expect("seed src");
-    fixture_git(&home, &["-C", &src_str, "add", "-A"]);
-    fixture_git(
-        &home,
-        &[
-            "-C",
-            &src_str,
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@test.local",
-            "commit",
-            "-q",
-            "-m",
-            "init",
-        ],
-    );
-    let base = fixture_git(&home, &["-C", &src_str, "rev-parse", "HEAD"]);
-    (src_str, base)
-}
-
-fn token(attempt: &str, fence: u64) -> Value {
+fn token() -> Value {
     json!({
         "organization_id": "org_fixture",
         "variant_id": "var_roundtrip1",
-        "attempt_id": attempt,
-        "attempt_fence": fence,
+        "attempt_id": "atm_roundtrip1",
+        "attempt_fence": 7,
         "workspace_nonce": NONCE.to_vec(),
         "runner_epoch": 1,
     })
@@ -103,10 +53,6 @@ fn spawn_daemon(hostile_home: &Path) -> Conversation {
         .env("GIT_DIR", "/nonexistent-git-dir")
         .env("GIT_WORK_TREE", "/nonexistent-work-tree")
         .env("GIT_INDEX_FILE", "/nonexistent-index")
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            hostile_home.join(".gitconfig").as_os_str(),
-        )
         .spawn()
         .expect("spawn bullet-gitd");
     let stdin = child.stdin.take().expect("stdin");
@@ -118,261 +64,46 @@ fn spawn_daemon(hostile_home: &Path) -> Conversation {
     }
 }
 
-fn hostile_home(root: &Path, canary: &Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let home = root.join("hostile-home");
-    let hooks = home.join("hostile-hooks");
-    std::fs::create_dir_all(&hooks).expect("hostile hooks");
-    let script = hooks.join("pre-commit");
-    std::fs::write(&script, format!("#!/bin/sh\ntouch {}\n", canary.display()))
-        .expect("hook script");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    std::fs::write(
-        home.join(".gitconfig"),
-        format!("[core]\n\thooksPath = {}\n", hooks.display()),
-    )
-    .expect("hostile config");
-    home
-}
-
-fn clone_and_read(conv: &mut Conversation, src: &str, base: &str, root: &Path) {
-    let resp = conv.send(&json!({
-        "id": -1, "method": "read_tree", "token": token(ATTEMPT, FENCE),
-        "params": {}, "unknown": true
-    }));
-    assert_eq!(resp["err"]["code"], "BAD_REQUEST");
-
-    // Before clone, everything else is refused.
-    let resp = conv.send(&json!({
-        "id": 0, "method": "read_tree", "token": token(ATTEMPT, FENCE), "params": {}
-    }));
-    assert_eq!(resp["err"]["code"], "NOT_CLONED");
-
-    let resp = conv.send(&json!({
-        "id": 1, "method": "clone", "token": token(ATTEMPT, FENCE),
+#[test]
+fn self_authored_token_cannot_create_a_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("farm");
+    let mut conversation = spawn_daemon(temp.path());
+    let response = conversation.send(&json!({
+        "id": 1,
+        "method": "clone",
+        "token": token(),
         "params": {
-            "source_repo": src,
-            "base_sha": base,
-            "root": root.to_string_lossy(),
+            "source_repo": "/does/not/matter",
+            "base_sha": "a".repeat(40),
+            "root": root,
             "created_at": "2026-08-24T00:00:00Z",
             "allowed_prefixes": ["src"],
-            "commit_date": "2026-08-24T00:00:00+00:00",
+            "commit_date": "2026-08-24T00:00:00+00:00"
         }
     }));
-    assert_eq!(resp["ok"]["base_sha"], base, "clone failed: {resp}");
-    assert_eq!(
-        resp["ok"]["branch"],
-        format!("bullet/var_roundtrip1/{ATTEMPT}")
-    );
-
-    let resp = conv.send(&json!({
-        "id": 2, "method": "read_tree", "token": token(ATTEMPT, FENCE), "params": {}
-    }));
-    let files = resp["ok"]["files"].as_array().expect("files");
-    assert!(files.iter().any(|f| f == "README.md"));
-}
-
-fn apply_and_checkpoint(conv: &mut Conversation) {
-    let resp = conv.send(&json!({
-        "id": 3, "method": "apply_change", "token": token(ATTEMPT, FENCE),
-        "params": {"patches": [
-            {"path": "src/lib.rs", "contents_hex": hex::encode("pub fn hello() {}\n")}
-        ]}
-    }));
-    assert_eq!(resp["ok"]["applied"], 1, "apply failed: {resp}");
-
-    let resp = conv.send(&json!({
-        "id": 4, "method": "checkpoint", "token": token(ATTEMPT, FENCE), "params": {}
-    }));
-    let git_tree = resp["ok"]["git_tree"].as_str().expect("git tree");
-    assert_eq!(git_tree.len(), 40);
-}
-
-fn refused_tokens_and_scope(conv: &mut Conversation) {
-    // Stale fence, empty token, and garbage token are refused mid-session.
-    let resp = conv.send(&json!({
-        "id": 5, "method": "checkpoint", "token": token(ATTEMPT, FENCE + 1), "params": {}
-    }));
-    assert_eq!(resp["err"]["code"], "STALE_AUTHORITY");
-    let resp = conv.send(&json!({
-        "id": 6, "method": "checkpoint", "token": "", "params": {}
-    }));
-    assert_eq!(resp["err"]["code"], "UNAUTHORIZED");
-    let resp = conv.send(&json!({
-        "id": 7, "method": "checkpoint", "token": "x", "params": {}
-    }));
-    assert_eq!(resp["err"]["code"], "UNAUTHORIZED");
-
-    // Out-of-scope patch names the path and applies nothing.
-    let resp = conv.send(&json!({
-        "id": 8, "method": "apply_change", "token": token(ATTEMPT, FENCE),
-        "params": {"patches": [
-            {"path": "README.md", "contents_hex": hex::encode("hijack")}
-        ]}
-    }));
-    assert_eq!(resp["err"]["code"], "OUT_OF_SCOPE");
-    assert!(resp["err"]["message"]
-        .as_str()
-        .expect("message")
-        .contains("README.md"));
-}
-
-fn refused_admission_limits(conv: &mut Conversation) {
-    let resp = conv.send(&json!({
-        "id": 30, "method": "apply_change", "token": token(ATTEMPT, FENCE),
-        "params": {"patches": []}
-    }));
-    assert_eq!(resp["err"]["code"], "INVALID_OPERATION_COUNT");
-
-    let resp = conv.send(&json!({
-        "id": 31, "method": "apply_change", "token": token(ATTEMPT, FENCE),
-        "params": {"patches": [{
-            "path": "src/large.rs",
-            "contents_hex": "00".repeat(1_048_577)
-        }]}
-    }));
-    assert_eq!(resp["err"]["code"], "CONTENT_TOO_LARGE");
-
-    let resp = conv.send(&json!({
-        "id": 32, "method": "apply_change", "token": token(ATTEMPT, FENCE),
-        "params": {"patches": [], "unknown": true}
-    }));
-    assert_eq!(resp["err"]["code"], "BAD_REQUEST");
-}
-
-fn delete_flow(conv: &mut Conversation, root: &Path) {
-    let repo_dir = root.join("work").join(ATTEMPT).join("repo");
-    // Delete of a nonexistent path is typed; the whole batch applies nothing.
-    let resp = conv.send(&json!({
-        "id": 20, "method": "apply_change", "token": token(ATTEMPT, FENCE),
-        "params": {"patches": [
-            {"path": "src/extra.rs", "contents_hex": hex::encode("x")},
-            {"path": "src/ghost.rs", "op": "delete"}
-        ]}
-    }));
-    assert_eq!(resp["err"]["code"], "PATH_ABSENT");
-    assert!(resp["err"]["message"]
-        .as_str()
-        .expect("message")
-        .contains("src/ghost.rs"));
-    assert!(
-        !repo_dir.join("src/extra.rs").exists(),
-        "failed batch must not write"
-    );
-
-    // Malformed delete entries are BAD_REQUEST before any mutation.
-    let resp = conv.send(&json!({
-        "id": 21, "method": "apply_change", "token": token(ATTEMPT, FENCE),
-        "params": {"patches": [{"path": "src/seed.rs", "op": "delete", "contents_hex": "00"}]}
-    }));
-    assert_eq!(resp["err"]["code"], "BAD_REQUEST");
-    let resp = conv.send(&json!({
-        "id": 22, "method": "apply_change", "token": token(ATTEMPT, FENCE),
-        "params": {"patches": [{"path": "src/seed.rs", "op": "defenestrate"}]}
-    }));
-    assert_eq!(resp["err"]["code"], "BAD_REQUEST");
-    assert!(repo_dir.join("src/seed.rs").exists(), "still untouched");
-
-    // A real delete of a tracked file applies.
-    let resp = conv.send(&json!({
-        "id": 23, "method": "apply_change", "token": token(ATTEMPT, FENCE),
-        "params": {"patches": [{"path": "src/seed.rs", "op": "delete"}]}
-    }));
-    assert_eq!(resp["ok"]["applied"], 1, "delete failed: {resp}");
-    assert!(!repo_dir.join("src/seed.rs").exists(), "file removed");
-}
-
-fn prepare_and_cleanup(conv: &mut Conversation, base: &str, root: &Path, bundle: &Path) {
-    let resp = conv.send(&json!({
-        "id": 9, "method": "prepare_candidate", "token": token(ATTEMPT, FENCE),
-        "params": {"change_seed": "feat", "mission": "roundtrip demo"}
-    }));
-    let candidate = &resp["ok"];
-    assert_eq!(candidate["base_commit"], base, "prepare failed: {resp}");
-    let head = candidate["head_commit"].as_str().expect("head");
-    assert_eq!(head.len(), 40);
-    assert_ne!(head, base);
-    assert!(candidate["id"].as_str().expect("id").starts_with("can_"));
-    assert_eq!(
-        candidate["patch_hash"].as_str().expect("patch hash").len(),
-        64
-    );
-    let scope = candidate["actual_scope"].as_array().expect("actual scope");
-    assert!(
-        scope.iter().any(|p| p == "src/seed.rs"),
-        "deletion lands in actual_scope: {resp}"
-    );
-    assert!(scope.iter().any(|p| p == "src/lib.rs"));
-
-    // The committed tree no longer tracks the deleted file.
-    let resp = conv.send(&json!({
-        "id": 12, "method": "read_tree", "token": token(ATTEMPT, FENCE), "params": {}
-    }));
-    let files = resp["ok"]["files"].as_array().expect("files");
-    assert!(files.iter().any(|f| f == "src/lib.rs"));
-    assert!(
-        !files.iter().any(|f| f == "src/seed.rs"),
-        "deleted file must not linger: {resp}"
-    );
-
-    // Cleanup without a preservation receipt is refused.
-    let resp = conv.send(&json!({
-        "id": 10, "method": "cleanup", "token": token(ATTEMPT, FENCE),
-        "params": {"deleted_at": "2026-08-24T01:00:00Z"}
-    }));
-    assert_eq!(resp["err"]["code"], "CLEANUP_RECEIPT_REQUIRED");
-
-    let resp = conv.send(&json!({
-        "id": 11, "method": "cleanup", "token": token(ATTEMPT, FENCE),
-        "params": {
-            "bundle_path": bundle.to_string_lossy(),
-            "deleted_at": "2026-08-24T01:00:00Z",
-        }
-    }));
-    assert_eq!(resp["ok"]["verified"], true, "cleanup failed: {resp}");
-    assert!(bundle.is_file(), "preservation bundle written");
-    assert!(
-        !root.join("work").join(ATTEMPT).exists(),
-        "workspace deleted"
-    );
-    let tombstone = resp["ok"]["tombstone"].as_str().expect("tombstone");
-    assert!(Path::new(tombstone).is_file());
-}
-
-#[test]
-fn stdio_conversation_covers_the_full_lifecycle() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (src, base) = init_source(tmp.path());
-    let canary = tmp.path().join("canary");
-    let home = hostile_home(tmp.path(), &canary);
-    let root = tmp.path().join("farm");
-    let bundle = tmp.path().join("preserve.bundle");
-    let mut conv = spawn_daemon(&home);
-    clone_and_read(&mut conv, &src, &base, &root);
-    apply_and_checkpoint(&mut conv);
-    refused_tokens_and_scope(&mut conv);
-    refused_admission_limits(&mut conv);
-    delete_flow(&mut conv, &root);
-    prepare_and_cleanup(&mut conv, &base, &root, &bundle);
-    assert!(!canary.exists(), "hostile hook executed inside the daemon");
-    conv.finish();
+    assert_eq!(response["err"]["code"], "AUTHORITY_CONTRACT_UNAVAILABLE");
+    assert!(!root.exists(), "authority refusal must precede clone I/O");
+    conversation.finish();
 }
 
 #[test]
 fn oversized_stdio_frame_is_refused_before_json_parsing() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let canary = tmp.path().join("canary");
-    let home = hostile_home(tmp.path(), &canary);
-    let mut conv = spawn_daemon(&home);
-    conv.stdin
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut conversation = spawn_daemon(temp.path());
+    conversation
+        .stdin
         .write_all(&vec![b'x'; MAX_FRAME_BYTES + 1])
         .expect("write oversized frame");
-    conv.stdin.write_all(b"\n").expect("write delimiter");
-    conv.stdin.flush().expect("flush frame");
+    conversation.stdin.write_all(b"\n").expect("delimiter");
+    conversation.stdin.flush().expect("flush frame");
     let mut line = String::new();
-    conv.reader.read_line(&mut line).expect("read refusal");
+    conversation
+        .reader
+        .read_line(&mut line)
+        .expect("read refusal");
     let response: Value = serde_json::from_str(&line).expect("response json");
     assert_eq!(response["id"], Value::Null);
     assert_eq!(response["err"]["code"], "FRAME_TOO_LARGE");
-    conv.finish();
+    conversation.finish();
 }

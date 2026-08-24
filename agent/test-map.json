@@ -11,7 +11,7 @@
     },
     "crates/bullet-gitd/": {
       "command": "cargo test -p bullet-gitd",
-      "purpose": "prove authority verification and the stdio protocol round trip against the built daemon binary"
+      "purpose": "prove unavailable authority prevents production mutation, private permits bind exact calls, durable replay fails closed, and stdio frames remain bounded"
     },
     "ops/": {
       "command": "just check",
@@ -39,7 +39,7 @@
     },
     ".gitignore": {
       "command": "bash scripts/ci-local.sh fast",
-      "purpose": "ignore rules; the fast lane proves the tree still builds"
+      "purpose": "ignored-file policy; the fast lane proves the tree still builds"
     },
     "LICENSE": {
       "command": "test -s LICENSE",
@@ -60,6 +60,18 @@
     "Cargo.lock": {
       "command": "bash scripts/ci-local.sh fast",
       "purpose": "locked dependency graph"
+    },
+    "rust-toolchain.toml": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "pinned Rust toolchain; the required lane builds and lints with it"
+    },
+    "scripts/ci-local.sh": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "canonical local lane dispatcher exercised by the required lane"
+    },
+    "docs/architecture.md": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "daemon trust-boundary contract checked with the required implementation proof"
     }
   }
 }

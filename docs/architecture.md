@@ -42,12 +42,39 @@ tree.
 
 ## Trust model
 
-- **Authority.** Every call carries the kernel `AuthorityToken` JSON. The
-  daemon captures `attempt_id`/`attempt_fence`/`workspace_nonce` from the
-  initial `clone` token and verifies every subsequent token against them
-  (`RealRepository` re-verifies as defence in depth). Empty or unparseable
-  token → `UNAUTHORIZED`; attempt/fence/nonce mismatch → `STALE_AUTHORITY`.
-  A display name, PID, branch name, or path grants nothing.
+- **Authority is fail-closed.** The committed hub authority contract is not
+  yet published through an immutable permitted dependency, and Kernel has no
+  production permit endpoint. The public daemon constructor therefore
+  installs only an unavailable final checker. In a fresh daemon, `clone`
+  reaches that checker and returns `AUTHORITY_CONTRACT_UNAVAILABLE` before
+  repository, journal, or preservation I/O. Because no production `clone` can
+  establish a session, `apply_change`, `checkpoint`, `prepare_candidate`, and
+  `cleanup` instead fail their earlier local prerequisite with `NOT_CLONED`;
+  they do not reach authority reservation or repository I/O. Keeping that
+  ordering prevents a future positive checker from reserving a permit for an
+  impossible local session. The legacy unsigned JSON token parser remains only
+  as an earlier rejection layer; it grants no mutation. Production enablement
+  still requires the pinned `bullet-wire` source, protected runtime trust
+  roots, local PASETO verification, Kernel's online reservation/final check,
+  and signed one-second operation permits. A display name, PID, branch name,
+  path, local token, or test checker grants nothing.
+  The audited contract source is hub commit
+  `c07efb10639d500c3e82ccc282265090ff63a4aa`, but no immutable tag points to
+  it and that checkout has no configured publication remote. The schema-2
+  family lock still names alpha.4 hub commit
+  `4d7f21731983e855f07d4a5a8e97fd5d743a3dc7`. BulletGit must not copy the
+  source, invent a tag, or enable a positive checker until an operator
+  publishes the frozen contract and updates the verified lock.
+- **Durable replay prerequisite.** The local mutation ledger records one exact
+  Mutation/reservation/operation/request-digest plus the digest of its verified
+  signed permit in an append-only, fsynced JSONL file. The permit digest binds
+  the full signed repository, workspace-generation, Attempt/fence, epoch,
+  freeze, nonce, and envelope subject without duplicating unpublished wire
+  types. Exact terminal results replay without another
+  reservation; changed subjects conflict. A restart with only an in-flight
+  reservation, a partial write, or corrupt state is
+  `MUTATION_OUTCOME_UNKNOWN`, never permission to retry. This ledger records
+  evidence only and cannot mint authority.
 - **No remote, no credential.** `git remote remove origin` runs immediately
   after clone; `credential.helper=` is forced empty, `GIT_ASKPASS` points at
   a deny script, `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND=false`. A
@@ -142,14 +169,13 @@ response: {"id": <same>, "ok": <result>}
           {"id": <same>, "err": {"code": <REASON_CODE>, "message": <text>}}
 ```
 
-The `token` field carries the kernel `AuthorityToken` as a JSON object
-(unknown fields ignored; `variant_id`, `attempt_id`, `attempt_fence`,
-`workspace_nonce` required). A string token is parsed as JSON text and a
-missing/null token as empty; anything that does not parse to a valid token
-fails closed as `UNAUTHORIZED`.
+The legacy `token` field accepts the old Kernel JSON shape as an opaque input
+to the unavailable gateway. Its local Attempt/fence/nonce comparison is not a
+signature or final authority check and can never make a mutation succeed.
+Empty or malformed values can fail earlier as `UNAUTHORIZED`.
 
-`clone` must be the first call; the daemon then serves exactly one workspace
-session and fences every subsequent call with the clone-time token values.
+`clone` remains the first possible workspace call, but the production daemon
+cannot create that session until the immutable authority consumer lands.
 
 | Method | Params | Result |
 |---|---|---|
@@ -160,20 +186,24 @@ session and fences every subsequent call with the clone-time token values.
 | `prepare_candidate` | `change_seed`, `mission` | Candidate JSON (exact SHAs, `patch_hash`; `lineage_subject`/`environment_digest` are `null` until a producer populates them) |
 | `cleanup` | `bundle_path` (required receipt target), `deleted_at` | `tombstone`, `bundle`, `verified` |
 
-Example conversation:
+Current production conversation:
 
 ```text
 → {"id":1,"method":"clone","token":{...},"params":{"source_repo":"/mirrors/repo.git","base_sha":"d6d3…","root":"/farm","created_at":"2026-08-24T00:00:00Z","allowed_prefixes":["src"],"commit_date":"2026-08-24T00:00:00+00:00"}}
-← {"id":1,"ok":{"repo_dir":"/farm/work/atm_1/repo","branch":"bullet/var_1/atm_1","base_sha":"d6d3…","runtime_dir":"/farm/runtime/atm_1"}}
-→ {"id":2,"method":"apply_change","token":{...},"params":{"patches":[{"path":"src/lib.rs","contents_hex":"7075…"}]}}
-← {"id":2,"ok":{"applied":1}}
-→ {"id":3,"method":"apply_change","token":{...},"params":{"patches":[{"path":"src/old.rs","op":"delete"}]}}
-← {"id":3,"ok":{"applied":1}}
-→ {"id":4,"method":"prepare_candidate","token":{...},"params":{"change_seed":"feat","mission":"demo"}}
-← {"id":4,"ok":{"id":"can_…","base_commit":"d6d3…","head_commit":"9f2c…","tree_hash":"41ab…","patch_hash":"…", ...}}
+← {"id":1,"err":{"code":"AUTHORITY_CONTRACT_UNAVAILABLE","message":"…"}}
+→ {"id":2,"method":"apply_change","token":{...},"params":{"patches":[]}}
+← {"id":2,"err":{"code":"NOT_CLONED","message":"clone must be the first call"}}
 ```
 
-Error codes: `UNAUTHORIZED`, `STALE_AUTHORITY`, `OUT_OF_SCOPE`,
+The second refusal is a local session precondition, not evidence that
+authority was accepted. The same fresh-daemon ordering applies to
+`checkpoint`, `prepare_candidate`, and `cleanup`.
+
+Error codes: `AUTHORITY_CONTRACT_UNAVAILABLE`, `AUTHORITY_REFUSED`,
+`AUTHORITY_SUBJECT_MISMATCH`, `MUTATION_PERMIT_EXPIRED`,
+`INVALID_MUTATION_PERMIT_WINDOW`, `AUTHORITY_REPLAY_CONFLICT`,
+`MUTATION_OUTCOME_UNKNOWN`, `MUTATION_LEDGER_IO_FAILED`, `UNAUTHORIZED`,
+`STALE_AUTHORITY`, `OUT_OF_SCOPE`,
 `PATH_ABSENT`, `DUPLICATE_PATH`, `PATH_COLLISION`, `INVALID_OPERATION_COUNT`,
 `CONTENT_TOO_LARGE`, `SYMLINK_FORBIDDEN`,
 `WORKTREE_FORBIDDEN`, `WRONG_REPOSITORY`, `WRONG_BRANCH`,
@@ -182,9 +212,8 @@ Error codes: `UNAUTHORIZED`, `STALE_AUTHORITY`, `OUT_OF_SCOPE`,
 `HOSTILE_GIT_CONFIG`, `GIT_FAILED`, `IO_FAILED`, `INVALID_TYPES`, plus protocol-level
 `BAD_REQUEST`, `FRAME_TOO_LARGE`, `INVALID_UTF8`, `PROTOCOL_IO_FAILED`,
 `NOT_CLONED`, `ALREADY_CLONED`, `UNKNOWN_METHOD`, `ENCODING`.
-All v1 codes are unchanged; `PATH_ABSENT`, `DUPLICATE_PATH`,
-`PATH_COLLISION`, and `MIRROR_LOCK_TIMEOUT` are additive, as is the optional
-patch `op` field.
+The authority and replay codes are additive and fail closed. They do not claim
+that the unpublished signed-authority consumer exists.
 
 ## Hash framing
 

@@ -1,6 +1,8 @@
 //! Request dispatch. The daemon holds the expected attempt/fence/nonce from
 //! the initial `clone` token and verifies every subsequent call against them.
 
+use crate::authority_gateway::{AuthorityGateway, GatewayError, MutationPermit};
+use crate::mutation_ledger::MutationOperation;
 use crate::protocol::{
     self, ApplyParams, CleanupParams, CloneParams, PatchParam, PrepareParams, Request,
 };
@@ -21,6 +23,10 @@ fn cap(err: &CapabilityError) -> MethodError {
 }
 
 fn auth(err: &AuthorityError) -> MethodError {
+    (err.reason_code().to_string(), err.to_string())
+}
+
+fn gateway(err: &GatewayError) -> MethodError {
     (err.reason_code().to_string(), err.to_string())
 }
 
@@ -80,16 +86,29 @@ struct Session {
 }
 
 /// One daemon instance serves one workspace session.
-#[derive(Default)]
 pub struct Daemon {
     session: Option<Session>,
+    authority: AuthorityGateway,
+}
+
+impl Default for Daemon {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Daemon {
-    /// A daemon with no session; `clone` must be the first call.
+    /// A daemon with no session and no positive production authority path.
+    ///
+    /// Until the frozen `bullet-wire` crate is available from an immutable
+    /// permitted source and a Kernel final-check client is installed, every
+    /// mutation fails closed with `AUTHORITY_CONTRACT_UNAVAILABLE`.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            session: None,
+            authority: AuthorityGateway::unavailable(),
+        }
     }
 
     /// Handle one request line and produce one response line.
@@ -132,6 +151,32 @@ impl Daemon {
         Ok(token)
     }
 
+    fn authorize_mutation(
+        &mut self,
+        req: &Request,
+        operation: MutationOperation,
+    ) -> Result<MutationPermit, MethodError> {
+        self.authority
+            .authorize(operation, &req.token, &req.params)
+            .map_err(|error| gateway(&error))
+    }
+
+    fn consume_permit(
+        &self,
+        req: &Request,
+        operation: MutationOperation,
+        permit: MutationPermit,
+    ) -> Result<(), MethodError> {
+        let now = self
+            .authority
+            .now_unix_ms()
+            .map_err(|error| gateway(&error))?;
+        permit
+            .consume(operation, &req.token, &req.params, now)
+            .map(|_| ())
+            .map_err(|error| gateway(&error))
+    }
+
     fn handle_clone(&mut self, req: &Request) -> MethodResult {
         if self.session.is_some() {
             return Err((
@@ -151,6 +196,8 @@ impl Daemon {
             created_at: &params.created_at,
             nonce: token.workspace_nonce,
         };
+        let permit = self.authorize_mutation(req, MutationOperation::CloneWorkspace)?;
+        self.consume_permit(req, MutationOperation::CloneWorkspace, permit)?;
         let workspace = PrivateClone::create(&clone_req).map_err(|e| cap(&e))?;
         let grant = ScopeGrant::new(&params.allowed_prefixes).map_err(|e| cap(&e))?;
         let expected = ExpectedAuthority {
@@ -178,9 +225,9 @@ impl Daemon {
     fn handle_repo(&mut self, req: &Request) -> MethodResult {
         let _ = self.verify_token(req)?;
         let envelope = protocol::envelope(&req.token);
-        let session = self.session.as_mut().ok_or_else(not_cloned)?;
         match req.method.as_str() {
             "read_tree" => {
+                let session = self.session.as_mut().ok_or_else(not_cloned)?;
                 let files = session.repo.read_tree(&envelope).map_err(|e| cap(&e))?;
                 Ok(json!({ "files": files }))
             }
@@ -190,6 +237,9 @@ impl Daemon {
                 for patch in params.patches {
                     patches.push(decode_patch(patch)?);
                 }
+                let permit = self.authorize_mutation(req, MutationOperation::ApplyPatch)?;
+                self.consume_permit(req, MutationOperation::ApplyPatch, permit)?;
+                let session = self.session.as_mut().ok_or_else(not_cloned)?;
                 session
                     .repo
                     .apply_change(&envelope, &patches)
@@ -197,6 +247,9 @@ impl Daemon {
                 Ok(json!({ "applied": patches.len() }))
             }
             "checkpoint" => {
+                let permit = self.authorize_mutation(req, MutationOperation::Checkpoint)?;
+                self.consume_permit(req, MutationOperation::Checkpoint, permit)?;
+                let session = self.session.as_mut().ok_or_else(not_cloned)?;
                 let checkpoint = session.repo.checkpoint(&envelope).map_err(|e| cap(&e))?;
                 to_value(&checkpoint)
             }
@@ -207,6 +260,9 @@ impl Daemon {
                     mission: params.mission.clone(),
                     acceptance_root: Digest::of(params.mission.as_bytes()),
                 };
+                let permit = self.authorize_mutation(req, MutationOperation::PrepareCandidate)?;
+                self.consume_permit(req, MutationOperation::PrepareCandidate, permit)?;
+                let session = self.session.as_mut().ok_or_else(not_cloned)?;
                 let candidate = session
                     .repo
                     .prepare_candidate(&envelope, &change)
@@ -226,6 +282,8 @@ impl Daemon {
                 "cleanup requires bundle_path for the preservation receipt".into(),
             ));
         };
+        let permit = self.authorize_mutation(req, MutationOperation::CleanupWorkspace)?;
+        self.consume_permit(req, MutationOperation::CleanupWorkspace, permit)?;
         let receipt = {
             let session = self.session.as_ref().ok_or_else(not_cloned)?;
             session

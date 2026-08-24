@@ -1,7 +1,9 @@
 //! bullet-gitd: capability-secure repository daemon. Agents do not receive a
 //! Git binary; every mutation carries an AuthorityToken and is verified here.
 
+mod authority_gateway;
 pub mod daemon;
+pub mod mutation_ledger;
 pub mod protocol;
 
 use bullet_git_journal::{Checkpoint, Journal};
