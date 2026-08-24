@@ -7,7 +7,7 @@ use crate::safe_git::{FileProtocol, HeadState};
 use crate::scope::ScopeGrant;
 use crate::status::{parse_status_line, StatusEntry};
 use crate::CapabilityError;
-use bullet_git_journal::{Checkpoint, Journal};
+use bullet_git_journal::{Checkpoint, DurableJournal, JournalMutation};
 use bullet_git_types::{
     AuthorityEnvelope, Candidate, CandidateId, Change, Digest, GitOid, WireAuthorityToken,
 };
@@ -120,27 +120,27 @@ pub struct RealRepository {
     grant: ScopeGrant,
     expected: ExpectedAuthority,
     identity: CommitIdentity,
-    journal: Journal,
+    journal: DurableJournal,
     checkpoint_count: u64,
 }
 
 impl RealRepository {
     /// Bind a private clone to a scope grant and expected authority.
-    #[must_use]
     pub fn new(
         workspace: PrivateClone,
         grant: ScopeGrant,
         expected: ExpectedAuthority,
         identity: CommitIdentity,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CapabilityError> {
+        let journal = DurableJournal::open(workspace.runtime_dir().join("journal"))?;
+        Ok(Self {
             workspace,
             grant,
             expected,
             identity,
-            journal: Journal::new(),
+            journal,
             checkpoint_count: 0,
-        }
+        })
     }
 
     /// Borrow the underlying workspace.
@@ -329,15 +329,25 @@ impl AgentRepository for RealRepository {
             restore_all(&undo);
             return Err(err);
         }
-        for (patch, path) in patches.iter().zip(&normalized) {
-            match &patch.op {
-                PatchOp::Write(contents) => self.journal.record(path, contents),
-                PatchOp::Delete => {
-                    if let Some((_, Some(before))) = undo.iter().find(|(p, _)| p.ends_with(path)) {
-                        self.journal.record_delete(path, before);
-                    }
-                }
+        let mutations = patches
+            .iter()
+            .zip(&normalized)
+            .zip(&undo)
+            .map(|((patch, path), (_, prior))| match &patch.op {
+                PatchOp::Write(contents) => JournalMutation::write(path, contents),
+                PatchOp::Delete => JournalMutation::delete(
+                    path,
+                    prior
+                        .as_deref()
+                        .expect("validated delete always has before-state bytes"),
+                ),
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) = self.journal.record_batch(&mutations) {
+            if !error.may_have_published() {
+                restore_all(&undo);
             }
+            return Err(error.into());
         }
         Ok(())
     }

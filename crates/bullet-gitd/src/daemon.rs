@@ -163,7 +163,8 @@ impl Daemon {
             grant,
             expected.clone(),
             CommitIdentity::farm(&params.commit_date),
-        );
+        )
+        .map_err(|error| cap(&error))?;
         self.session = Some(Session { repo, expected });
         Ok(result)
     }

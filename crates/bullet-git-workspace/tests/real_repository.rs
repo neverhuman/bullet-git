@@ -67,6 +67,59 @@ fn full_lifecycle_produces_exact_candidate() {
 }
 
 #[test]
+fn journal_reopens_from_the_workspace_runtime_directory() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let mut repo = real_repo(workspace, ATTEMPT);
+    let auth = good_auth();
+    repo.apply_change(
+        &auth,
+        &[
+            patch("src/a.rs", "pub fn a() {}\n"),
+            patch("src/b.rs", "pub fn b() {}\n"),
+        ],
+    )
+    .expect("apply durable batch");
+    let expected_ops = repo.journal_ops().to_vec();
+    let expected_checkpoint = repo.checkpoint(&auth).expect("checkpoint");
+    let workspace = repo.into_workspace();
+
+    let mut reopened = real_repo(workspace, ATTEMPT);
+    assert_eq!(reopened.journal_ops(), expected_ops);
+    assert_eq!(
+        reopened
+            .checkpoint(&auth)
+            .expect("reopened checkpoint")
+            .tree,
+        expected_checkpoint.tree
+    );
+}
+
+#[test]
+fn journal_append_failure_restores_the_applied_file_batch() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let mut repo = real_repo(workspace, ATTEMPT);
+    let auth = good_auth();
+    let target = repo.workspace().repo_dir().join("src/lib.rs");
+    let before = std::fs::read(&target).expect("read before-state");
+    let occupied = repo
+        .workspace()
+        .runtime_dir()
+        .join("journal/00000000000000000001-00000000000000000001.json");
+    std::fs::write(&occupied, b"occupied").expect("occupy next batch name");
+
+    let error = repo
+        .apply_change(&auth, &[patch("src/lib.rs", "pub fn changed() {}\n")])
+        .expect_err("journal publication refused");
+    assert_eq!(error.reason_code(), "JOURNAL_FAILED");
+    assert_eq!(std::fs::read(&target).expect("read restored file"), before);
+    assert!(repo.journal_ops().is_empty(), "failed batch became visible");
+}
+
+#[test]
 fn same_tree_means_same_tree_sha_and_order_does_not_matter() {
     let a = patch("src/a.rs", "pub fn a() {}\n");
     let b = patch("src/b.rs", "pub fn b() {}\n");

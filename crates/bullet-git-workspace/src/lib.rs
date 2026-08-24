@@ -88,6 +88,9 @@ pub enum CapabilityError {
     /// A git command exited unsuccessfully.
     #[error("git command failed: {0}")]
     Git(String),
+    /// Durable workspace journal could not append or recover safely.
+    #[error("workspace journal failed: {0}")]
+    Journal(String),
     /// Repository-local Git configuration could execute code or redirect truth.
     #[error("hostile repository-local git config: {0}")]
     HostileGitConfig(String),
@@ -121,10 +124,17 @@ impl CapabilityError {
             Self::CleanupNonceMismatch => "CLEANUP_NONCE_MISMATCH",
             Self::CleanupReceiptRequired(_) => "CLEANUP_RECEIPT_REQUIRED",
             Self::Git(_) => "GIT_FAILED",
+            Self::Journal(_) => "JOURNAL_FAILED",
             Self::HostileGitConfig(_) => "HOSTILE_GIT_CONFIG",
             Self::Io(_) => "IO_FAILED",
             Self::Types(_) => "INVALID_TYPES",
         }
+    }
+}
+
+impl From<bullet_git_journal::JournalError> for CapabilityError {
+    fn from(error: bullet_git_journal::JournalError) -> Self {
+        Self::Journal(format!("{}: {error}", error.reason_code()))
     }
 }
 

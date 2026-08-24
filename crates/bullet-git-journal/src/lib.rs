@@ -1,5 +1,10 @@
 //! Append-only workspace journal. Uncommitted work is recoverable state.
 
+mod durable;
+mod storage;
+
+pub use durable::{DurableJournal, JournalError, JournalMutation};
+
 use bullet_git_types::{frame, CheckpointId, Digest, GitOid};
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +19,7 @@ pub enum JournalOpKind {
 }
 
 impl JournalOpKind {
-    fn frame_tag(self) -> &'static [u8] {
+    pub(crate) fn frame_tag(self) -> &'static [u8] {
         match self {
             Self::Write => b"w",
             Self::Delete => b"d",
@@ -49,7 +54,7 @@ pub struct Checkpoint {
 }
 
 /// In-memory journal.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Journal {
     ops: Vec<JournalOp>,
 }

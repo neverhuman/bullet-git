@@ -117,4 +117,5 @@ pub fn real_repo(workspace: PrivateClone, attempt: &str) -> RealRepository {
         },
         CommitIdentity::farm(COMMIT_DATE),
     )
+    .expect("open durable repository journal")
 }

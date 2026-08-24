@@ -54,6 +54,9 @@ version = "0.1.0"
 dependencies = [
  "bullet-git-types",
  "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
