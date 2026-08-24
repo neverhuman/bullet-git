@@ -5,7 +5,9 @@
 //! steps; [`RealRepository`] implements the capability API over a real clone.
 
 mod apply;
+mod cas;
 mod clone;
+mod fsync;
 mod git_config;
 mod mirror;
 mod patch;
@@ -14,6 +16,7 @@ mod safe_git;
 mod scope;
 mod status;
 
+pub use cas::{cas_digest, CasError, CasPut, ImmutableCas, PutDisposition, MAX_CAS_OBJECT_BYTES};
 pub use clone::{CloneRequest, PreservationReceipt, PrivateClone, WorkspaceManifest};
 pub use mirror::{mirror_dir, MirrorLock, LOCK_MAX_WAIT, LOCK_STALE_AFTER};
 pub use patch::{validate_batch, PatchHunk, PatchOp, MAX_CONTENT_BYTES, MAX_PATCH_OPERATIONS};
