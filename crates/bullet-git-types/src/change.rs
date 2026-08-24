@@ -77,6 +77,12 @@ pub struct Candidate {
     pub parent_candidate_id: Option<CandidateId>,
     /// Preparation timestamp from the caller's clock (RFC 3339).
     pub prepared_at: String,
+    /// Lineage subject bound to this Candidate (kernel/wire sync).
+    #[serde(default)]
+    pub lineage_subject: Option<String>,
+    /// Environment digest bound to this Candidate (kernel/wire sync).
+    #[serde(default)]
+    pub environment_digest: Option<Digest>,
 }
 
 /// Merkle binding of proof claims to an exact Candidate.
@@ -145,6 +151,8 @@ mod tests {
             actual_scope: vec!["src/lib.rs".into()],
             parent_candidate_id: None,
             prepared_at: "2026-08-24T00:00:00Z".into(),
+            lineage_subject: None,
+            environment_digest: None,
         }
     }
 

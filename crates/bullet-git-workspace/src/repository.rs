@@ -385,6 +385,8 @@ impl AgentRepository for RealRepository {
             actual_scope,
             parent_candidate_id: None,
             prepared_at: self.identity.date.clone(),
+            lineage_subject: None,
+            environment_digest: None,
         })
     }
 }

@@ -72,6 +72,8 @@ impl MemoryRepository {
             actual_scope: from.actual_scope.clone(),
             parent_candidate_id: Some(from.id.clone()),
             prepared_at: from.prepared_at.clone(),
+            lineage_subject: from.lineage_subject.clone(),
+            environment_digest: from.environment_digest,
         };
         let edge = EvolutionEdge {
             from: from.id.clone(),
@@ -161,6 +163,8 @@ impl AgentRepository for MemoryRepository {
             actual_scope: files.iter().map(|(p, _)| p.clone()).collect(),
             parent_candidate_id: None,
             prepared_at: "memory".into(),
+            lineage_subject: None,
+            environment_digest: None,
         })
     }
 }
