@@ -1,0 +1,16 @@
+{
+  "workspace": "bullet-git",
+  "owners": {
+    "AGENTS.md": "agent",
+    "SPLIT.md": "split",
+    "README.md": "docs",
+    "LICENSE": "workspace",
+    "Justfile": "ops",
+    "Cargo.toml": "workspace",
+    "agent/": "agent",
+    "crates/": "git",
+    "docs/": "docs",
+    "ops/": "ops",
+    "scripts/": "ops"
+  }
+}

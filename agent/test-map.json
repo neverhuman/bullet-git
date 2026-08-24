@@ -1,0 +1,13 @@
+{
+  "workspace": "bullet-git",
+  "tests": {
+    "crates/": {
+      "command": "cargo test --workspace",
+      "purpose": "prove Change/Candidate, capability API, journal, and proof roots"
+    },
+    "ops/": {
+      "command": "just fast",
+      "purpose": "verify local CI parity"
+    }
+  }
+}

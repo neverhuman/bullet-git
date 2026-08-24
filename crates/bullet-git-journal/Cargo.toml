@@ -1,0 +1,13 @@
+[package]
+name = "bullet-git-journal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bullet-git-types.workspace = true
+serde.workspace = true
