@@ -16,3 +16,9 @@ contract:
 
 security:
     bash scripts/ci-local.sh security
+
+audit:
+    bash scripts/ci-local.sh audit
+
+nightly:
+    bash scripts/ci-local.sh nightly
