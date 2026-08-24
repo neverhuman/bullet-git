@@ -3,6 +3,7 @@
 mod authority;
 mod change;
 mod ids;
+pub mod schema_bundle;
 
 pub use authority::{AuthorityEnvelope, AuthorityError, WireAuthorityToken};
 pub use change::{Candidate, Change, EvolutionEdge, EvolutionKind, ProofRoot};
