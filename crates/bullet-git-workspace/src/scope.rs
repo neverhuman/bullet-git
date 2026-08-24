@@ -2,26 +2,35 @@
 
 use crate::CapabilityError;
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 /// Normalize a repository-relative path.
 ///
-/// Rejects absolute paths, backslashes, NUL bytes, empty/`.`/`..` segments,
-/// and any segment named `.git`. The result contains no escapes after
-/// normalization.
+/// NFC-normalizes Unicode and rejects absolute paths, backslashes, NUL bytes,
+/// empty/`.`/`..` segments, any segment named `.git`, Windows alternate-data
+/// stream syntax, and trailing dots/spaces. The result contains no escapes.
 ///
 /// # Errors
 ///
 /// Returns `OUT_OF_SCOPE` naming the offending path.
 pub fn normalize_rel_path(raw: &str) -> Result<String, CapabilityError> {
-    if raw.is_empty() || raw.starts_with('/') || raw.contains('\\') || raw.contains('\0') {
+    let normalized = raw.nfc().collect::<String>();
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.contains('\\')
+        || normalized.contains('\0')
+    {
         return Err(CapabilityError::OutOfScope(raw.to_string()));
     }
     let mut parts: Vec<&str> = Vec::new();
-    for segment in raw.split('/') {
+    for segment in normalized.split('/') {
         if segment.is_empty() || segment == "." || segment == ".." {
             return Err(CapabilityError::OutOfScope(raw.to_string()));
         }
-        if segment.eq_ignore_ascii_case(".git") {
+        if segment.eq_ignore_ascii_case(".git")
+            || segment.contains(':')
+            || segment.ends_with(['.', ' '])
+        {
             return Err(CapabilityError::OutOfScope(raw.to_string()));
         }
         parts.push(segment);
@@ -100,11 +109,18 @@ mod tests {
             ".git/hooks/pre-commit",
             "src/.git/config",
             "src\\win",
+            "src/file:stream",
+            "src/file.",
+            "src/file ",
             "a\0b",
         ] {
             assert!(normalize_rel_path(bad).is_err(), "accepted {bad:?}");
         }
         assert_eq!(normalize_rel_path("src/lib.rs").expect("ok"), "src/lib.rs");
+        assert_eq!(
+            normalize_rel_path("src/cafe\u{301}.rs").expect("NFC"),
+            "src/caf\u{e9}.rs"
+        );
     }
 
     #[test]

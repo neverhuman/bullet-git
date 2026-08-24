@@ -1,11 +1,12 @@
 //! The capability API and its real-Git implementation.
 
+use crate::apply::{apply_all, restore_all};
 use crate::clone::{guard_repository, sequencer_check, PrivateClone};
 use crate::patch::{validate_batch, PatchHunk, PatchOp};
 use crate::safe_git::{FileProtocol, HeadState};
 use crate::scope::ScopeGrant;
 use crate::status::{parse_status_line, StatusEntry};
-use crate::{io_err, CapabilityError};
+use crate::CapabilityError;
 use bullet_git_journal::{Checkpoint, Journal};
 use bullet_git_types::{
     AuthorityEnvelope, Candidate, CandidateId, Change, Digest, GitOid, WireAuthorityToken,
@@ -22,8 +23,8 @@ pub trait AgentRepository {
     /// Returns `UNAUTHORIZED`/`STALE_AUTHORITY` on a bad token.
     fn read_tree(&self, auth: &AuthorityEnvelope) -> Result<Vec<String>, CapabilityError>;
 
-    /// Apply a scoped patch set. All paths are validated before any write;
-    /// a failed validation leaves the tree untouched.
+    /// Apply a scoped patch set. Validation is all-or-nothing; writes are
+    /// snapshot-rollback atomic so a later IO error restores the prior tree.
     ///
     /// # Errors
     ///
@@ -322,22 +323,19 @@ impl AgentRepository for RealRepository {
         self.expected.require(auth)?;
         self.guard()?;
         let normalized = self.validate_patches(patches)?;
+        let mut undo = Vec::new();
+        let applied = apply_all(self.workspace.repo_dir(), patches, &normalized, &mut undo);
+        if let Err(err) = applied {
+            restore_all(&undo);
+            return Err(err);
+        }
         for (patch, path) in patches.iter().zip(&normalized) {
-            let target = self.workspace.repo_dir().join(path);
             match &patch.op {
-                PatchOp::Write(contents) => {
-                    if let Some(parent) = target.parent() {
-                        fs::create_dir_all(parent)
-                            .map_err(|err| io_err("create patch dir", &err))?;
-                    }
-                    fs::write(&target, contents).map_err(|err| io_err("write patch", &err))?;
-                    self.journal.record(path, contents);
-                }
+                PatchOp::Write(contents) => self.journal.record(path, contents),
                 PatchOp::Delete => {
-                    let before =
-                        fs::read(&target).map_err(|err| io_err("read delete target", &err))?;
-                    fs::remove_file(&target).map_err(|err| io_err("delete patch target", &err))?;
-                    self.journal.record_delete(path, &before);
+                    if let Some((_, Some(before))) = undo.iter().find(|(p, _)| p.ends_with(path)) {
+                        self.journal.record_delete(path, before);
+                    }
                 }
             }
         }

@@ -2,7 +2,7 @@
 
 use crate::scope::ScopeGrant;
 use crate::CapabilityError;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// One patch operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,40 +46,40 @@ impl PatchHunk {
 /// paths, one per patch in order.
 ///
 /// Scope covers deletes exactly like writes. Delete targets must exist:
-/// `exists` reports whether a regular file currently backs a normalized path,
-/// and the batch is simulated in order, so a write earlier in the batch
-/// satisfies a later delete of the same path while an earlier delete
-/// invalidates it.
+/// `exists` reports whether a regular file currently backs a normalized path.
+/// Every normalized path may appear only once; multi-operation sequences must
+/// be collapsed by the proposal producer before admission.
 ///
 /// # Errors
 ///
-/// Returns `OUT_OF_SCOPE` for any path outside the grant and `PATH_ABSENT`
-/// for a delete whose target would not exist; either error means nothing was
-/// mutated.
+/// Returns `OUT_OF_SCOPE` for any path outside the grant, `DUPLICATE_PATH`
+/// for repeated/conflicting paths, and `PATH_ABSENT` for a delete whose target
+/// does not exist; any error means nothing was mutated.
 pub fn validate_batch(
     grant: &ScopeGrant,
     patches: &[PatchHunk],
     exists: impl Fn(&str) -> bool,
 ) -> Result<Vec<String>, CapabilityError> {
     let mut normalized = Vec::with_capacity(patches.len());
-    let mut created: HashSet<String> = HashSet::new();
-    let mut deleted: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut portable: HashMap<String, String> = HashMap::new();
     for patch in patches {
         let path = grant.check(&patch.path)?;
-        match &patch.op {
-            PatchOp::Write(_) => {
-                deleted.remove(&path);
-                created.insert(path.clone());
-            }
-            PatchOp::Delete => {
-                let present =
-                    created.contains(&path) || (!deleted.contains(&path) && exists(&path));
-                if !present {
-                    return Err(CapabilityError::PathAbsent(path));
-                }
-                created.remove(&path);
-                deleted.insert(path.clone());
-            }
+        if !seen.insert(path.clone()) {
+            return Err(CapabilityError::DuplicatePath(path));
+        }
+        let portable_key = path
+            .chars()
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+        if let Some(first) = portable.insert(portable_key, path.clone()) {
+            return Err(CapabilityError::PathCollision {
+                first,
+                second: path,
+            });
+        }
+        if matches!(patch.op, PatchOp::Delete) && !exists(&path) {
+            return Err(CapabilityError::PathAbsent(path));
         }
         normalized.push(path);
     }
@@ -110,38 +110,34 @@ mod tests {
     }
 
     #[test]
-    fn batch_simulation_orders_writes_and_deletes() {
-        let ok = validate_batch(
-            &grant(),
-            &[
+    fn duplicate_and_conflicting_paths_are_typed_and_named() {
+        for patches in [
+            vec![
+                PatchHunk::write("src/new.rs", b"x".to_vec()),
+                PatchHunk::write("src/new.rs", b"y".to_vec()),
+            ],
+            vec![
                 PatchHunk::write("src/new.rs", b"x".to_vec()),
                 PatchHunk::delete("src/new.rs"),
             ],
-            |_| false,
-        )
-        .expect("write satisfies later delete");
-        assert_eq!(ok, vec!["src/new.rs".to_string(), "src/new.rs".to_string()]);
+        ] {
+            let err = validate_batch(&grant(), &patches, |_| true).expect_err("duplicate refused");
+            assert_eq!(err.reason_code(), "DUPLICATE_PATH");
+            assert!(err.to_string().contains("src/new.rs"));
+        }
 
-        let err = validate_batch(
-            &grant(),
-            &[
-                PatchHunk::delete("src/lib.rs"),
-                PatchHunk::delete("src/lib.rs"),
-            ],
-            |path| path == "src/lib.rs",
-        )
-        .expect_err("second delete has no target");
-        assert_eq!(err.reason_code(), "PATH_ABSENT");
+        let equivalent = vec![
+            PatchHunk::write("src/caf\u{e9}.rs", b"x".to_vec()),
+            PatchHunk::write("src/cafe\u{301}.rs", b"y".to_vec()),
+        ];
+        let err = validate_batch(&grant(), &equivalent, |_| false).expect_err("NFC duplicate");
+        assert_eq!(err.reason_code(), "DUPLICATE_PATH");
 
-        validate_batch(
-            &grant(),
-            &[
-                PatchHunk::delete("src/lib.rs"),
-                PatchHunk::write("src/lib.rs", b"y".to_vec()),
-                PatchHunk::delete("src/lib.rs"),
-            ],
-            |path| path == "src/lib.rs",
-        )
-        .expect("recreate then delete");
+        let case_collision = vec![
+            PatchHunk::write("src/Name.rs", b"x".to_vec()),
+            PatchHunk::write("src/name.rs", b"y".to_vec()),
+        ];
+        let err = validate_batch(&grant(), &case_collision, |_| false).expect_err("case collision");
+        assert_eq!(err.reason_code(), "PATH_COLLISION");
     }
 }

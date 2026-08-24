@@ -122,6 +122,41 @@ fn out_of_scope_patch_is_refused_naming_the_path_and_tree_untouched() {
 }
 
 #[test]
+fn duplicate_patch_paths_are_refused_before_any_file_is_written() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let mut repo = real_repo(workspace, ATTEMPT);
+    let auth = good_auth();
+    let target = repo.workspace().repo_dir().join("src/duplicate.rs");
+    let err = repo
+        .apply_change(
+            &auth,
+            &[
+                patch("src/duplicate.rs", "first\n"),
+                patch("src/duplicate.rs", "second\n"),
+            ],
+        )
+        .expect_err("duplicate refused");
+    assert_eq!(err.reason_code(), "DUPLICATE_PATH");
+    assert!(!target.exists(), "validation failure must precede mutation");
+
+    let upper = repo.workspace().repo_dir().join("src/Portable.rs");
+    let lower = repo.workspace().repo_dir().join("src/portable.rs");
+    let err = repo
+        .apply_change(
+            &auth,
+            &[
+                patch("src/Portable.rs", "first\n"),
+                patch("src/portable.rs", "second\n"),
+            ],
+        )
+        .expect_err("portable collision refused");
+    assert_eq!(err.reason_code(), "PATH_COLLISION");
+    assert!(!upper.exists() && !lower.exists(), "batch must be atomic");
+}
+
+#[test]
 fn hostile_hooks_and_home_config_never_execute() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (src, base) = init_source(tmp.path());

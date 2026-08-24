@@ -4,6 +4,7 @@
 //! environment (spec §20.3). [`PrivateClone`] implements the §20.2 creation
 //! steps; [`RealRepository`] implements the capability API over a real clone.
 
+mod apply;
 mod clone;
 mod mirror;
 mod patch;
@@ -37,6 +38,17 @@ pub enum CapabilityError {
     /// A delete patch targeted a path with no regular file behind it.
     #[error("no regular file to delete at: {0}")]
     PathAbsent(String),
+    /// A batch named the same normalized path more than once.
+    #[error("duplicate or conflicting patch path: {0}")]
+    DuplicatePath(String),
+    /// Two paths collide after portable case folding.
+    #[error("portable path collision: {first} conflicts with {second}")]
+    PathCollision {
+        /// First admitted spelling.
+        first: String,
+        /// Conflicting spelling.
+        second: String,
+    },
     /// Path traverses or targets a symlink.
     #[error("symlink writes are forbidden: {0}")]
     SymlinkForbidden(String),
@@ -92,6 +104,8 @@ impl CapabilityError {
             Self::StaleAuthority(_) => "STALE_AUTHORITY",
             Self::OutOfScope(_) => "OUT_OF_SCOPE",
             Self::PathAbsent(_) => "PATH_ABSENT",
+            Self::DuplicatePath(_) => "DUPLICATE_PATH",
+            Self::PathCollision { .. } => "PATH_COLLISION",
             Self::SymlinkForbidden(_) => "SYMLINK_FORBIDDEN",
             Self::WorktreeForbidden(_) => "WORKTREE_FORBIDDEN",
             Self::WrongRepository(_) => "WRONG_REPOSITORY",
