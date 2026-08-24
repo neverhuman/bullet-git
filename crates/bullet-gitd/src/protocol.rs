@@ -77,7 +77,7 @@ pub fn read_frame(reader: &mut impl BufRead) -> Result<Option<String>, FrameRead
 pub struct Request {
     /// Correlation id, echoed back verbatim.
     pub id: Value,
-    /// clone | read_tree | apply_change | checkpoint | prepare_candidate | cleanup.
+    /// clone | read_tree | apply_change | checkpoint | prepare_candidate | preserve | cleanup.
     pub method: String,
     /// AuthorityToken JSON object. A string is treated as raw token bytes;
     /// null or absent as an empty token. Both fail verification.
@@ -166,14 +166,20 @@ pub struct PrepareParams {
     pub mission: String,
 }
 
+/// `preserve` parameters.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreserveParams {
+    /// New absolute canonical directory outside workspace-owned paths.
+    pub destination: String,
+}
+
 /// `cleanup` parameters.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CleanupParams {
-    /// Where to write the preservation bundle. Required: cleanup without a
-    /// preservation receipt is refused.
-    #[serde(default)]
-    pub bundle_path: Option<String>,
+    /// Opaque sealed token returned by `preserve`.
+    pub preservation_receipt: String,
     /// RFC 3339 deletion timestamp from the caller's clock.
     pub deleted_at: String,
 }

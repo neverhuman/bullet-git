@@ -365,7 +365,7 @@ impl GenerationStore {
         Ok(())
     }
 
-    fn active_dir(&self) -> PathBuf {
+    pub(crate) fn active_dir(&self) -> PathBuf {
         self.active_repo
             .parent()
             .expect("active repo always has a generation parent")

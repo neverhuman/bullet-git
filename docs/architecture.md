@@ -150,10 +150,21 @@ tree.
   HEAD is detected via the `symbolic-ref -q HEAD` exit status, never by
   comparing a branch name to the string "HEAD"; detached is the expected
   state between base checkout and private-branch creation.
-- **Cleanup (spec §20.8).** Deletion requires a nonce match against the
-  manifest plus a verified preservation receipt (`git bundle create` then
-  `git bundle verify`), and writes a tombstone JSON in the runtime dir.
-  Name/path reuse waits for the tombstone.
+- **Preservation before cleanup (spec §20.8).** `preserve` accepts only a new,
+  absolute, canonical external directory outside the exact work/runtime
+  targets. It copies and fsyncs the complete active generation (private repo,
+  generation manifest, and durable journal), immutable CAS, workspace
+  manifest, and a verified Git bundle. A daemon-held 256-bit seal persisted
+  outside the provider-visible repository authenticates an opaque receipt
+  binding Attempt, fence, workspace nonce, active generation/tree and full
+  generation digest, exact dirty/untracked manifest, journal range/root,
+  complete artifact digest, destination device/inode, and cleanup target.
+  `cleanup` accepts only that opaque receipt. It repeats source, destination,
+  subject, journal/CAS, bundle, and full-artifact verification immediately
+  before deleting exactly the sealed work directory; missing or changed
+  bytes, forged/stale receipts, and destination swaps leave the workspace
+  intact. Runtime state, the private seal, external artifact, and a receipt-
+  bound tombstone survive cleanup. Name/path reuse waits for the tombstone.
 
 ## bullet-gitd stdio protocol
 
@@ -184,7 +195,8 @@ cannot create that session until the immutable authority consumer lands.
 | `apply_change` | `patches`: `[{path, op?, contents_hex?}]` — `op` is `write` (default; full-file `contents_hex` required, hex) or `delete` (must omit `contents_hex`) | `applied`: count |
 | `checkpoint` | — | Checkpoint JSON incl. `git_tree` |
 | `prepare_candidate` | `change_seed`, `mission` | Candidate JSON (exact SHAs, `patch_hash`; `lineage_subject`/`environment_digest` are `null` until a producer populates them) |
-| `cleanup` | `bundle_path` (required receipt target), `deleted_at` | `tombstone`, `bundle`, `verified` |
+| `preserve` | `destination` (new absolute canonical external directory) | opaque `preservation_receipt`, receipt/artifact digests, canonical destination |
+| `cleanup` | `preservation_receipt`, `deleted_at` | `tombstone`, receipt digest, `verified` |
 
 Current production conversation:
 
@@ -208,7 +220,9 @@ Error codes: `AUTHORITY_CONTRACT_UNAVAILABLE`, `AUTHORITY_REFUSED`,
 `CONTENT_TOO_LARGE`, `SYMLINK_FORBIDDEN`,
 `WORKTREE_FORBIDDEN`, `WRONG_REPOSITORY`, `WRONG_BRANCH`,
 `SEQUENCER_ACTIVE`, `UNCLASSIFIED_UNTRACKED`, `BASE_MISSING`,
-`MIRROR_LOCK_TIMEOUT`, `CLEANUP_NONCE_MISMATCH`, `CLEANUP_RECEIPT_REQUIRED`,
+`MIRROR_LOCK_TIMEOUT`, `PRESERVATION_INVALID_DESTINATION`,
+`PRESERVATION_CORRUPT`, `PRESERVATION_RECEIPT_REFUSED`,
+`PRESERVATION_UNSUPPORTED`, `PRESERVATION_IO_FAILED`,
 `HOSTILE_GIT_CONFIG`, `GIT_FAILED`, `IO_FAILED`, `INVALID_TYPES`, plus protocol-level
 `BAD_REQUEST`, `FRAME_TOO_LARGE`, `INVALID_UTF8`, `PROTOCOL_IO_FAILED`,
 `NOT_CLONED`, `ALREADY_CLONED`, `UNKNOWN_METHOD`, `ENCODING`.

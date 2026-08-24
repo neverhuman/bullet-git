@@ -75,6 +75,7 @@ dependencies = [
 name = "bullet-git-workspace"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bullet-git-journal",
  "bullet-git-types",
  "hex",

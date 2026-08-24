@@ -14,6 +14,8 @@ mod generation_tests;
 mod git_config;
 mod mirror;
 mod patch;
+mod preservation;
+mod preservation_io;
 mod repository;
 mod safe_git;
 mod scope;
@@ -21,10 +23,11 @@ mod status;
 mod tree_copy;
 
 pub use cas::{cas_digest, CasError, CasPut, ImmutableCas, PutDisposition, MAX_CAS_OBJECT_BYTES};
-pub use clone::{CloneRequest, PreservationReceipt, PrivateClone, WorkspaceManifest};
+pub use clone::{CloneRequest, PrivateClone, WorkspaceManifest};
 pub use generation::GenerationError;
 pub use mirror::{mirror_dir, MirrorLock, LOCK_MAX_WAIT, LOCK_STALE_AFTER};
 pub use patch::{validate_batch, PatchHunk, PatchOp, MAX_CONTENT_BYTES, MAX_PATCH_OPERATIONS};
+pub use preservation::{PreservationAuthority, PreservationError, PreservationReceipt};
 pub use repository::{AgentRepository, CommitIdentity, ExpectedAuthority, RealRepository};
 pub use safe_git::{FileProtocol, GitOutput, HeadState, SafeGit};
 pub use scope::{normalize_rel_path, ScopeGrant};
@@ -105,12 +108,6 @@ pub enum CapabilityError {
     /// The exclusive mirror lock could not be acquired within the bound.
     #[error("mirror lock wait timed out: {0}")]
     MirrorLockTimeout(String),
-    /// Cleanup was requested with a nonce that does not match the manifest.
-    #[error("cleanup nonce mismatch")]
-    CleanupNonceMismatch,
-    /// Cleanup was requested without a verified preservation receipt.
-    #[error("cleanup requires a verified preservation receipt: {0}")]
-    CleanupReceiptRequired(String),
     /// A git command exited unsuccessfully.
     #[error("git command failed: {0}")]
     Git(String),
@@ -123,6 +120,9 @@ pub enum CapabilityError {
     /// Immutable workspace generation failed or has an indeterminate switch.
     #[error(transparent)]
     Generation(#[from] GenerationError),
+    /// Preservation or sealed cleanup authorization failed.
+    #[error(transparent)]
+    Preservation(#[from] PreservationError),
     /// Repository-local Git configuration could execute code or redirect truth.
     #[error("hostile repository-local git config: {0}")]
     HostileGitConfig(String),
@@ -155,12 +155,11 @@ impl CapabilityError {
             Self::UnclassifiedUntracked(_) => "UNCLASSIFIED_UNTRACKED",
             Self::BaseMissing(_) => "BASE_MISSING",
             Self::MirrorLockTimeout(_) => "MIRROR_LOCK_TIMEOUT",
-            Self::CleanupNonceMismatch => "CLEANUP_NONCE_MISMATCH",
-            Self::CleanupReceiptRequired(_) => "CLEANUP_RECEIPT_REQUIRED",
             Self::Git(_) => "GIT_FAILED",
             Self::Journal(_) => "JOURNAL_FAILED",
             Self::ContentStore(error) => error.reason_code(),
             Self::Generation(error) => error.reason_code(),
+            Self::Preservation(error) => error.reason_code(),
             Self::HostileGitConfig(_) => "HOSTILE_GIT_CONFIG",
             Self::Io(_) => "IO_FAILED",
             Self::Types(_) => "INVALID_TYPES",

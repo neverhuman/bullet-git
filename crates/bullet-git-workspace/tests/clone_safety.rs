@@ -2,7 +2,7 @@
 
 mod support;
 
-use bullet_git_workspace::{CloneRequest, FileProtocol, PreservationReceipt, PrivateClone};
+use bullet_git_workspace::{CloneRequest, FileProtocol, PrivateClone};
 use support::{clone_workspace, init_source, ATTEMPT, CREATED_AT, NONCE, VARIANT};
 
 #[test]
@@ -61,53 +61,4 @@ fn missing_or_invalid_base_sha_fails_closed() {
     })
     .expect_err("malformed base");
     assert_eq!(err.reason_code(), "INVALID_TYPES");
-}
-
-#[test]
-fn cleanup_refuses_wrong_nonce() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (src, base) = init_source(tmp.path());
-    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
-    let bundle = tmp.path().join("preserve.bundle");
-    let receipt = workspace.preserve(&bundle).expect("receipt");
-    let err = workspace
-        .cleanup(&[0u8; 32], &receipt, CREATED_AT)
-        .expect_err("wrong nonce");
-    assert_eq!(err.reason_code(), "CLEANUP_NONCE_MISMATCH");
-}
-
-#[test]
-fn cleanup_refuses_unverified_or_missing_receipt() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (src, base) = init_source(tmp.path());
-    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
-    let fake = PreservationReceipt {
-        bundle_path: tmp.path().join("never-written.bundle"),
-        verified: false,
-    };
-    let err = workspace
-        .cleanup(&NONCE, &fake, CREATED_AT)
-        .expect_err("no receipt");
-    assert_eq!(err.reason_code(), "CLEANUP_RECEIPT_REQUIRED");
-}
-
-#[test]
-fn cleanup_with_verified_receipt_deletes_and_writes_tombstone() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (src, base) = init_source(tmp.path());
-    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
-    let repo_dir = workspace.repo_dir().to_path_buf();
-    let runtime_dir = workspace.runtime_dir().to_path_buf();
-    let bundle = tmp.path().join("preserve.bundle");
-    let receipt = workspace.preserve(&bundle).expect("receipt");
-    assert!(receipt.verified);
-    assert!(bundle.is_file(), "bundle receipt written");
-    let tombstone = workspace
-        .cleanup(&NONCE, &receipt, "2026-08-24T01:00:00Z")
-        .expect("cleanup");
-    assert!(!repo_dir.exists(), "workspace deleted");
-    assert!(tombstone.is_file(), "tombstone written");
-    assert!(tombstone.starts_with(&runtime_dir));
-    let text = std::fs::read_to_string(&tombstone).expect("tombstone json");
-    assert!(text.contains(&hex::encode(NONCE)));
 }

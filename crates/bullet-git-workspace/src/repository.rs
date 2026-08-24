@@ -19,6 +19,8 @@ use std::path::Path;
 
 #[path = "repository_ops.rs"]
 mod ops;
+#[path = "repository_preservation.rs"]
+mod preservation;
 
 /// Agent-facing repository capability.
 pub trait AgentRepository {
@@ -164,6 +166,10 @@ impl RealRepository {
     #[must_use]
     pub fn workspace(&self) -> &PrivateClone {
         &self.workspace
+    }
+
+    pub(crate) fn workspace_mut(&mut self) -> &mut PrivateClone {
+        &mut self.workspace
     }
 
     /// Release the underlying workspace (for cleanup).

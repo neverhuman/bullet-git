@@ -4,12 +4,13 @@
 use crate::authority_gateway::{AuthorityGateway, GatewayError, MutationPermit};
 use crate::mutation_ledger::MutationOperation;
 use crate::protocol::{
-    self, ApplyParams, CleanupParams, CloneParams, PatchParam, PrepareParams, Request,
+    self, ApplyParams, CleanupParams, CloneParams, PatchParam, PrepareParams, PreserveParams,
+    Request,
 };
 use bullet_git_types::{AuthorityError, Change, ChangeId, Digest, WireAuthorityToken};
 use bullet_git_workspace::{
     AgentRepository, CapabilityError, CloneRequest, CommitIdentity, ExpectedAuthority, PatchHunk,
-    PrivateClone, RealRepository, ScopeGrant, MAX_CONTENT_BYTES,
+    PreservationAuthority, PrivateClone, RealRepository, ScopeGrant, MAX_CONTENT_BYTES,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -83,6 +84,7 @@ fn decode_patch(patch: PatchParam) -> Result<PatchHunk, MethodError> {
 struct Session {
     repo: RealRepository,
     expected: ExpectedAuthority,
+    preservation: PreservationAuthority,
 }
 
 /// One daemon instance serves one workspace session.
@@ -132,6 +134,7 @@ impl Daemon {
             "read_tree" | "apply_change" | "checkpoint" | "prepare_candidate" => {
                 self.handle_repo(req)
             }
+            "preserve" => self.handle_preserve(req),
             "cleanup" => self.handle_cleanup(req),
             other => Err(("UNKNOWN_METHOD".into(), format!("unknown method: {other}"))),
         }
@@ -211,6 +214,8 @@ impl Daemon {
             "branch": workspace.branch(),
             "base_sha": workspace.base_sha(),
         });
+        let preservation = PreservationAuthority::open(workspace.runtime_dir())
+            .map_err(|error| (error.reason_code().into(), error.to_string()))?;
         let repo = RealRepository::new(
             workspace,
             grant,
@@ -218,7 +223,11 @@ impl Daemon {
             CommitIdentity::farm(&params.commit_date),
         )
         .map_err(|error| cap(&error))?;
-        self.session = Some(Session { repo, expected });
+        self.session = Some(Session {
+            repo,
+            expected,
+            preservation,
+        });
         Ok(result)
     }
 
@@ -273,33 +282,45 @@ impl Daemon {
         }
     }
 
+    fn handle_preserve(&mut self, req: &Request) -> MethodResult {
+        let _ = self.verify_token(req)?;
+        let params: PreserveParams = parse_params(&req.params)?;
+        let permit = self.authorize_mutation(req, MutationOperation::PreserveWorkspace)?;
+        self.consume_permit(req, MutationOperation::PreserveWorkspace, permit)?;
+        let envelope = protocol::envelope(&req.token);
+        let session = self.session.as_ref().ok_or_else(not_cloned)?;
+        let receipt = session
+            .preservation
+            .issue(&session.repo, &envelope, Path::new(&params.destination))
+            .map_err(|error| cap(&error))?;
+        Ok(json!({
+            "preservation_receipt": receipt.token(),
+            "preservation_receipt_digest": receipt.receipt_digest().to_hex(),
+            "artifact_digest": receipt.artifact_digest().to_hex(),
+            "destination": receipt.destination().display().to_string(),
+        }))
+    }
+
     fn handle_cleanup(&mut self, req: &Request) -> MethodResult {
-        let token = self.verify_token(req)?;
+        let _ = self.verify_token(req)?;
         let params: CleanupParams = parse_params(&req.params)?;
-        let Some(bundle) = params.bundle_path else {
-            return Err((
-                "CLEANUP_RECEIPT_REQUIRED".into(),
-                "cleanup requires bundle_path for the preservation receipt".into(),
-            ));
-        };
         let permit = self.authorize_mutation(req, MutationOperation::CleanupWorkspace)?;
         self.consume_permit(req, MutationOperation::CleanupWorkspace, permit)?;
-        let receipt = {
-            let session = self.session.as_ref().ok_or_else(not_cloned)?;
-            session
-                .repo
-                .workspace()
-                .preserve(Path::new(&bundle))
-                .map_err(|e| cap(&e))?
-        };
-        let session = self.session.take().ok_or_else(not_cloned)?;
-        let workspace = session.repo.into_workspace();
-        let tombstone = workspace
-            .cleanup(&token.workspace_nonce, &receipt, &params.deleted_at)
-            .map_err(|e| cap(&e))?;
+        let envelope = protocol::envelope(&req.token);
+        let session = self.session.as_mut().ok_or_else(not_cloned)?;
+        let tombstone = session
+            .preservation
+            .cleanup(
+                &mut session.repo,
+                &envelope,
+                &params.preservation_receipt,
+                &params.deleted_at,
+            )
+            .map_err(|error| cap(&error))?;
+        self.session = None;
         Ok(json!({
             "tombstone": tombstone.display().to_string(),
-            "bundle": bundle,
+            "preservation_receipt_digest": Digest::of(params.preservation_receipt.as_bytes()).to_hex(),
             "verified": true,
         }))
     }

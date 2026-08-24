@@ -2,6 +2,7 @@
 
 use crate::generation::{GenerationBootstrap, GenerationStore, StagedGeneration};
 use crate::mirror::sync_mirror;
+use crate::preservation::CleanupPermit;
 use crate::safe_git::{FileProtocol, HeadState, SafeGit};
 use crate::{io_err, CapabilityError};
 use bullet_git_journal::{Checkpoint, DurableJournal};
@@ -54,22 +55,12 @@ pub struct WorkspaceManifest {
     pub repo_dir: String,
 }
 
-/// Verified preservation receipt required before cleanup.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PreservationReceipt {
-    /// Bundle file written by `git bundle create`.
-    pub bundle_path: PathBuf,
-    /// Whether `git bundle verify` succeeded.
-    pub verified: bool,
-}
-
 /// A private writable clone with no remote and no credential path.
 #[derive(Debug)]
 pub struct PrivateClone {
     generations: GenerationStore,
     runtime_dir: PathBuf,
     manifest: WorkspaceManifest,
-    nonce: [u8; 32],
     git: SafeGit,
 }
 
@@ -154,7 +145,6 @@ impl PrivateClone {
             generations,
             runtime_dir,
             manifest,
-            nonce: req.nonce,
             git,
         })
     }
@@ -177,6 +167,14 @@ impl PrivateClone {
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.generations.generation()
+    }
+
+    pub(crate) fn work_dir(&self) -> &Path {
+        self.generations.work_dir()
+    }
+
+    pub(crate) fn active_generation_dir(&self) -> PathBuf {
+        self.generations.active_dir()
     }
 
     /// The per-workspace runtime directory (manifest, isolation dirs).
@@ -236,69 +234,52 @@ impl PrivateClone {
         self.generations.checkpoint()
     }
 
-    /// Write and verify a preservation bundle for cleanup.
+    /// Delete the one exact workspace named by a sealed cleanup permit.
     ///
     /// # Errors
     ///
-    /// Returns `GIT_FAILED` when the bundle cannot be created or verified.
-    pub fn preserve(&self, bundle_path: &Path) -> Result<PreservationReceipt, CapabilityError> {
-        let bundle = bundle_path.to_string_lossy().into_owned();
-        self.git.run(
-            Some(self.repo_dir()),
-            FileProtocol::Never,
-            &["bundle", "create", &bundle, "--all"],
-            &[],
-        )?;
-        self.git.run(
-            Some(self.repo_dir()),
-            FileProtocol::Never,
-            &["bundle", "verify", &bundle],
-            &[],
-        )?;
-        Ok(PreservationReceipt {
-            bundle_path: bundle_path.to_path_buf(),
-            verified: true,
-        })
-    }
-
-    /// Delete the workspace. Refuses without a nonce match and a verified
-    /// preservation receipt; writes a tombstone JSON and returns its path.
-    ///
-    /// # Errors
-    ///
-    /// Returns `CLEANUP_NONCE_MISMATCH` or `CLEANUP_RECEIPT_REQUIRED` when the
-    /// preconditions fail, `IO_FAILED` when deletion fails.
-    pub fn cleanup(
-        self,
-        nonce: &[u8; 32],
-        receipt: &PreservationReceipt,
+    /// Returns `PRESERVATION_RECEIPT_REFUSED` when the permit does not bind
+    /// this workspace, or `IO_FAILED` when deletion fails.
+    pub(crate) fn cleanup(
+        &mut self,
+        permit: CleanupPermit,
         deleted_at: &str,
     ) -> Result<PathBuf, CapabilityError> {
-        if nonce != &self.nonce {
-            return Err(CapabilityError::CleanupNonceMismatch);
-        }
-        if !receipt.verified || !receipt.bundle_path.is_file() {
-            return Err(CapabilityError::CleanupReceiptRequired(
-                "bundle missing or unverified".into(),
-            ));
-        }
-        let bundle = receipt.bundle_path.to_string_lossy().into_owned();
-        self.git
-            .run(
-                Some(self.repo_dir()),
-                FileProtocol::Never,
-                &["bundle", "verify", &bundle],
-                &[],
+        let work_dir = self.generations.work_dir().to_path_buf();
+        if !permit.matches(
+            &self.manifest.attempt_id,
+            &self.manifest.nonce_hex,
+            &work_dir,
+        ) {
+            return Err(crate::preservation::PreservationError::ReceiptRefused(
+                "cleanup permit does not bind this exact workspace".into(),
             )
-            .map_err(|err| CapabilityError::CleanupReceiptRequired(err.to_string()))?;
-        fs::remove_dir_all(self.generations.work_dir())
-            .map_err(|err| io_err("delete workspace", &err))?;
+            .into());
+        }
+        permit.revalidate(self)?;
+        let metadata = fs::symlink_metadata(&work_dir)
+            .map_err(|error| io_err("inspect cleanup target", &error))?;
+        let canonical = fs::canonicalize(&work_dir)
+            .map_err(|error| io_err("canonicalize cleanup target", &error))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() || canonical != work_dir {
+            return Err(crate::preservation::PreservationError::ReceiptRefused(
+                "cleanup target path identity changed".into(),
+            )
+            .into());
+        }
+        fs::remove_dir_all(&work_dir).map_err(|err| io_err("delete workspace", &err))?;
+        if let Some(parent) = work_dir.parent() {
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| io_err("sync cleanup parent", &error))?;
+        }
         let tombstone = serde_json::json!({
             "attempt_id": self.manifest.attempt_id,
             "variant_id": self.manifest.variant_id,
             "deleted_at": deleted_at,
             "nonce_hex": self.manifest.nonce_hex,
-            "bundle_path": bundle,
+            "preservation_receipt_digest": permit.receipt_digest().to_hex(),
+            "preservation_destination": permit.destination().display().to_string(),
         });
         let path = self.runtime_dir.join("tombstone.json");
         fs::write(&path, tombstone.to_string()).map_err(|err| io_err("write tombstone", &err))?;
