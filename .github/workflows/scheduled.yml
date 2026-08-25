@@ -1,0 +1,220 @@
+name: Scheduled diagnostics
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  source_scan:
+    name: scheduled source scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      observation: ${{ steps.artifacts.outputs.observation }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned gitleaks
+        run: bash ops/ci/install-gitleaks.sh
+      - name: Scan current source and lockfiles
+        run: bash scripts/ci-local.sh source-scan
+      - name: Validate sanitized observation
+        id: artifacts
+        if: ${{ !cancelled() }}
+        run: |
+          bash ops/ci/artifact-check.sh source-scan
+          echo "observation=present" >> "$GITHUB_OUTPUT"
+      - name: Upload source-scan observation
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bullet-git-scheduled-source-scan
+          path: .ci-artifacts/observations/source-scan.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  history:
+    name: Full-history secret scan
+    needs: source_scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install pinned gitleaks
+        run: bash ops/ci/install-gitleaks.sh
+      - name: Scan complete Git history
+        run: bash scripts/ci-local.sh history
+      - name: Validate sanitized observation
+        if: ${{ !cancelled() }}
+        run: bash ops/ci/artifact-check.sh history
+      - name: Upload history observation
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bullet-git-history
+          path: .ci-artifacts/observations/history.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  links:
+    name: External links
+    needs: source_scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check external links
+        run: bash scripts/ci-local.sh links
+      - name: Validate sanitized observation
+        if: ${{ !cancelled() }}
+        run: bash ops/ci/artifact-check.sh links
+      - name: Upload link observation
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bullet-git-links
+          path: .ci-artifacts/observations/links.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  advisory:
+    name: RustSec advisories
+    needs: source_scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: 1.97.1
+      - uses: taiki-e/install-action@81ee1d48d9194cdcab880cbdc7d36e87d39874cb # v2.62.45
+        with:
+          tool: cargo-deny@0.19.8
+          fallback: none
+      - name: Refresh and scan RustSec advisories
+        run: bash scripts/ci-local.sh advisory
+      - name: Validate sanitized observation
+        if: ${{ !cancelled() }}
+        run: bash ops/ci/artifact-check.sh advisory
+      - name: Upload advisory observation
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bullet-git-advisory
+          path: .ci-artifacts/observations/advisory.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  coverage:
+    name: Workspace coverage
+    needs: source_scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: 1.97.1
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@81ee1d48d9194cdcab880cbdc7d36e87d39874cb # v2.62.45
+        with:
+          tool: |
+            cargo-nextest@0.9.137
+            cargo-llvm-cov@0.8.7
+          fallback: none
+      - name: Generate LCOV report
+        run: bash scripts/ci-local.sh coverage
+      - name: Validate sanitized coverage artifact
+        if: ${{ !cancelled() }}
+        run: bash ops/ci/artifact-check.sh coverage
+      - name: Upload coverage diagnostic
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bullet-git-coverage
+          path: |
+            .ci-artifacts/observations/coverage.json
+            .ci-artifacts/reports/coverage.lcov
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS compile and typed refusal
+    needs: source_scan
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: 1.97.1
+      - name: Compile and prove typed mutation refusal
+        shell: bash
+        run: bash scripts/ci-local.sh platform
+      - name: Validate sanitized observation
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash ops/ci/artifact-check.sh platform
+      - name: Upload macOS observation
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bullet-git-macos-refusal
+          path: .ci-artifacts/observations/platform.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows compile and typed refusal
+    needs: source_scan
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: 1.97.1
+      - name: Compile and prove typed mutation refusal
+        shell: bash
+        run: bash scripts/ci-local.sh platform
+      - name: Validate sanitized observation
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash ops/ci/artifact-check.sh platform
+      - name: Upload Windows observation
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bullet-git-windows-refusal
+          path: .ci-artifacts/observations/platform.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14

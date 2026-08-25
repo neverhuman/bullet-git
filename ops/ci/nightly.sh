@@ -4,6 +4,7 @@
 # Set: no oracle adapter is registered yet, so the request fails closed instead of
 # reporting a green lane that ran nothing.
 set -euo pipefail
+# shellcheck source=ops/ci/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
 log "nightly lane"

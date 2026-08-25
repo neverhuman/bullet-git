@@ -9,11 +9,14 @@ its script; the workflow and the Justfile stay thin.
 
 | Lane | Script | Runs | Prerequisites (`scripts/ci-doctor.sh <lane>`) |
 | --- | --- | --- | --- |
-| fast | `ops/ci/fast.sh` | `cargo fmt --all --check`; `cargo nextest run --locked --workspace --profile fast` (`.config/nextest.toml`: fail-fast, 20 s slow-timeout, terminate after 2) | rustc 1.97.1 (`rust-toolchain.toml`), rustfmt, cargo-nextest 0.9.137 |
-| required | `ops/ci/required.sh` | `ops/ci/local-parity-test.sh` (asserts the pre-push hook, `quality-gates.sh`, `ci-doctor.sh`, and Justfile controls); fast; `cargo clippy --locked --workspace --all-targets -- -D warnings` | fast plus clippy |
-| contract | `ops/ci/contract.sh` | nextest `contract` profile over the whole workspace: the real local Git suites and the spawned daemon round trip; 45 s slow-timeout, no fail-fast, `num-cpus` threads; local processes only, no network | rustc, cargo-nextest, and a `git` binary on `PATH` (not checked by ci-doctor) |
-| security | `ops/ci/security.sh` | `gitleaks detect --source . --no-git --redact`; `cargo deny fetch db` and a lane-side freshness proof of the RustSec database; `cargo deny --locked check licenses advisories bans sources` against the committed `deny.toml`; `zizmor .` | gitleaks 8.21.2, cargo-deny 0.19.8, zizmor 1.25.2, `cargo`, `git` |
-| audit | `ops/ci/audit.sh` | `jankurai audit . --no-score-history --fail-under $AUDIT_FLOOR --fail-on critical` with `AUDIT_FLOOR=56`; artifacts in `.jankurai/` | jankurai 1.6.11; local/release only, not in `ci.yml` |
+| source-scan | `ops/ci/source-scan.sh` | current-tree gitleaks before dependency installation | gitleaks 8.21.2 |
+| fast | `ops/ci/fast.sh` | nonzero 32-case types/journal partition and JUnit | rustc 1.97.1, cargo-nextest 0.9.137 |
+| lint | `ops/ci/lint.sh` | format, strict Clippy, local/workflow/inventory meta-guards, actionlint, zizmor, ShellCheck | actionlint 1.7.8, zizmor 1.25.2, ShellCheck 0.10.0 plus Rust tools |
+| contract | `ops/ci/contract.sh` | nonzero 109-case workspace/daemon partition, real Git and daemon round trip, JUnit | rustc 1.97.1, cargo-nextest 0.9.137, Git |
+| security | `ops/ci/security.sh` | secret canary; fresh RustSec DB; cargo-deny licenses, advisories, bans, sources | gitleaks 8.21.2, cargo-deny 0.19.8, Git/network |
+| docs | `ops/ci/docs.sh` | relative links, warning-denied rustdoc, doctests | rustc 1.97.1, Bash/readlink |
+| required | `ops/ci/required.sh` | source admission then the five atomic lanes sequentially exactly once | union of atomic prerequisites |
+| audit | `ops/ci/audit.sh` | Jankurai full score with upward-only `AUDIT_FLOOR=65`; artifacts in `.jankurai/` | jankurai 1.6.11; local/release only |
 | nightly | `ops/ci/nightly.sh` | see the next section | bash only |
 
 ## Security lane policy
@@ -36,19 +39,26 @@ see it either because a failed `git fetch` still rewrites `FETCH_HEAD`. Never
 replace that gate with a `|| true`, a skip, or a wider age limit to get a green
 run on an offline host: an unrefreshed database means the scan is not trusted.
 
-`zizmor .` audits the workflow bytes. Without a GitHub API token it skips its
+`zizmor --offline --no-ignores --strict-collection .` audits the workflow bytes. Without a GitHub API token it skips its
 five online audits (impostor-commit, ref-confusion, known-vulnerable-actions,
 stale-action-refs, ref-version-mismatch) and prints that it is doing so; the
 offline audits still fail the lane on a finding. Do not add a token to make the
 online audits run from a proof lane.
 
-Hosted `ci.yml` runs fast, required, contract, and security with pinned
-installs (`dtolnay/rust-toolchain` 1.97.1, `taiki-e/install-action` for
-cargo-nextest 0.9.137, cargo-deny 0.19.8 and zizmor 1.25.2, sha256-checked
-gitleaks 8.21.2);
-every action is pinned to a full commit SHA and checkouts use
-`persist-credentials: false`. It never installs Playwright and never reaches
-a forge.
+Hosted `ci.yml` runs source admission first, then fast/lint/contract/security/docs
+in parallel. Workflow `CI` plus job `required` yields the stable protected
+context `CI / required`; its `if: always()` aggregator rejects failed, skipped,
+cancelled, missing, or observation-less jobs. PRs alone are cancellable. Pushes
+and merge groups always finish. Every action uses a full SHA, checkouts disable
+credentials, permissions are `contents: read`, and no cache is configured.
+
+`scheduled.yml` runs full-history secrets, external links, advisories, and
+coverage, plus `macos-15`/`windows-2025` compile and the existing production
+daemon test that asserts `AUTHORITY_CONTRACT_UNAVAILABLE` before clone I/O.
+Linux remains the only required mutation-capable platform. `ci.toml` describes
+the same local lane graph but is inert: its required job returns exit 78 with
+`JERYU_STATUS_BINDING_UNRATIFIED` until predecessor-result binding, runners,
+and checks are ratified with forge/public-mirror API read-back.
 
 ## `BULLET_LIVE_GITD` and the nightly lane
 
@@ -64,7 +74,7 @@ a forge.
   registered` to stderr and exits **1**, because no oracle adapter exists and
   a lane that ran nothing must not pass.
 
-No hosted schedule is registered. Do not add an oracle stub, a mock daemon, a
+The hosted schedule above is diagnostic and does not run this live oracle. Do not add an oracle stub, a mock daemon, a
 conditional skip, or an environment switch that turns either branch green. The
 lane becomes real only when a versioned `jeryu-gitd` from a separately
 reviewed immutable Jeryu tag is consumed (`docs/architecture.md`, trust

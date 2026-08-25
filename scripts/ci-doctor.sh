@@ -3,15 +3,26 @@ set -euo pipefail
 
 lane="${1:-all}"
 case "$lane" in
-  fast) tools=(bash cargo cargo-nextest dirname rustc rustfmt) ;;
-  required) tools=(bash cargo cargo-clippy cargo-nextest dirname rustc rustfmt) ;;
-  contract) tools=(bash cargo cargo-nextest dirname rustc) ;;
-  security) tools=(bash cargo cargo-deny dirname git gitleaks zizmor) ;;
-  audit) tools=(bash dirname jankurai mkdir) ;;
-  nightly) tools=(bash dirname) ;;
+  source-scan) tools=(bash dirname git gitleaks jq) ;;
+  fast) tools=(bash cargo cargo-nextest cp dirname git jq rustc) ;;
+  lint) tools=(actionlint bash cargo cargo-clippy cargo-nextest cmp comm dirname git jq mktemp rustc rustfmt shellcheck sort zizmor) ;;
+  contract) tools=(bash cargo cargo-nextest cp dirname git jq rustc) ;;
+  security) tools=(bash cargo cargo-deny date dirname git gitleaks jq rustc) ;;
+  docs) tools=(bash cargo dirname git jq readlink rustc) ;;
+  required) tools=(actionlint bash cargo cargo-clippy cargo-deny cargo-nextest cmp comm cp date dirname git gitleaks jq mktemp readlink rustc rustfmt shellcheck sort zizmor) ;;
+  audit) tools=(bash dirname git jankurai jq mkdir) ;;
+  nightly) tools=(bash dirname git jq) ;;
+  history) tools=(bash dirname git gitleaks jq) ;;
+  links) tools=(bash curl dirname git jq sort) ;;
+  advisory) tools=(bash cargo cargo-deny date dirname git jq rustc) ;;
+  coverage) tools=(bash cargo cargo-llvm-cov cargo-nextest dirname git jq rustc) ;;
+  platform) tools=(awk bash cargo dirname git jq rustc) ;;
   toolchain-msrv) tools=(b3sum bash cargo dirname git jq rustc rustup) ;;
-  all) tools=(bash cargo cargo-clippy cargo-deny cargo-nextest dirname git gitleaks jankurai mkdir rustc rustfmt zizmor) ;;
-  *) echo "ci-doctor: expected fast|required|contract|security|audit|nightly|toolchain-msrv|all" >&2; exit 2 ;;
+  all) tools=(actionlint bash cargo cargo-clippy cargo-deny cargo-nextest cmp comm cp date dirname git gitleaks jankurai jq mkdir mktemp readlink rustc rustfmt shellcheck sort zizmor) ;;
+  *)
+    echo "ci-doctor: expected source-scan|fast|lint|contract|security|docs|required|audit|nightly|history|links|advisory|coverage|platform|toolchain-msrv|all" >&2
+    exit 2
+    ;;
 esac
 
 missing=0
@@ -24,8 +35,6 @@ done
 [[ "$missing" -eq 0 ]] || exit 1
 
 if [[ "$lane" == toolchain-msrv ]]; then
-  # Lane-scoped admission only: the explicit MSRV lane may use rustup toolchain
-  # 1.95.0 in addition to (never instead of) the repository pin.
   rust_version="$(rustc --version)"
   [[ "$rust_version" == "rustc 1.97.1 "* ]] || {
     printf 'ci-doctor: expected rustc 1.97.1, found %s\n' "$rust_version" >&2
@@ -46,36 +55,56 @@ if [[ "$lane" == toolchain-msrv ]]; then
     exit 1
   }
 fi
-if [[ "$lane" =~ ^(fast|required|contract|all)$ ]]; then
+
+if [[ "$lane" =~ ^(fast|lint|contract|security|docs|required|advisory|coverage|platform|all)$ ]]; then
   rust_version="$(rustc --version)"
   [[ "$rust_version" == "rustc 1.97.1 "* ]] || {
     printf 'ci-doctor: expected rustc 1.97.1, found %s\n' "$rust_version" >&2
     exit 1
   }
+fi
+if [[ "$lane" =~ ^(fast|lint|contract|required|coverage|all)$ ]]; then
   nextest_version="$(cargo-nextest --version)"
   [[ "$nextest_version" == "cargo-nextest 0.9.137 "* ]] || {
     printf 'ci-doctor: expected cargo-nextest 0.9.137, found %s\n' "$nextest_version" >&2
     exit 1
   }
 fi
-if [[ "$lane" == audit || "$lane" == all ]]; then
-  jankurai_version="$(jankurai --version)"
-  [[ "$jankurai_version" == "jankurai 1.6.11" ]] || {
-    printf 'ci-doctor: expected jankurai 1.6.11, found %s\n' "$jankurai_version" >&2
-    exit 1
-  }
-fi
-if [[ "$lane" == security || "$lane" == all ]]; then
+if [[ "$lane" =~ ^(source-scan|security|required|history|all)$ ]]; then
   [[ "$(gitleaks version)" == "8.21.2" ]] || {
     echo "ci-doctor: expected gitleaks 8.21.2" >&2
     exit 1
   }
+fi
+if [[ "$lane" =~ ^(security|required|advisory|all)$ ]]; then
   [[ "$(cargo-deny --version)" == "cargo-deny 0.19.8" ]] || {
     echo "ci-doctor: expected cargo-deny 0.19.8" >&2
     exit 1
   }
+fi
+if [[ "$lane" =~ ^(lint|required|all)$ ]]; then
+  [[ "$(actionlint -version | head -n 1)" == "1.7.8" ]] || {
+    echo "ci-doctor: expected actionlint 1.7.8" >&2
+    exit 1
+  }
+  [[ "$(shellcheck --version | awk '/^version:/{print $2}')" == "0.10.0" ]] || {
+    echo "ci-doctor: expected ShellCheck 0.10.0" >&2
+    exit 1
+  }
   [[ "$(zizmor --version)" == "zizmor 1.25.2" ]] || {
     echo "ci-doctor: expected zizmor 1.25.2" >&2
+    exit 1
+  }
+fi
+if [[ "$lane" == coverage ]]; then
+  [[ "$(cargo llvm-cov --version)" == "cargo-llvm-cov 0.8.7" ]] || {
+    echo "ci-doctor: expected cargo-llvm-cov 0.8.7" >&2
+    exit 1
+  }
+fi
+if [[ "$lane" == audit || "$lane" == all ]]; then
+  [[ "$(jankurai --version)" == "jankurai 1.6.11" ]] || {
+    echo "ci-doctor: expected jankurai 1.6.11" >&2
     exit 1
   }
 fi

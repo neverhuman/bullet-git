@@ -3,10 +3,20 @@ default:
 
 setup:
     rustup component add rustfmt clippy
+    bash scripts/ci-local.sh source-scan
     cargo fetch --locked
 
 fast:
-    bash scripts/ci-local.sh fast
+    bash scripts/ci-local.sh fast # cargo nextest
+
+lint:
+    bash scripts/ci-local.sh lint
+
+docs:
+    bash scripts/ci-local.sh docs
+
+required:
+    bash scripts/ci-local.sh required
 
 check:
     bash scripts/ci-local.sh required

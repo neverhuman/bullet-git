@@ -18,6 +18,7 @@
 # (exit 1), never a skip. A failing build or test fails the lane after the
 # observation is written, so the failure itself stays on record.
 set -euo pipefail
+# shellcheck source=ops/ci/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
 

@@ -13,16 +13,19 @@ operator publishes the frozen contract (`SPLIT.md`, `docs/architecture.md`).
 ## Lanes
 
 Every lane is one script in `ops/ci/`, exposed through `bash scripts/ci-local.sh
-<lane>` and the matching `just` recipe, and called by the same entrypoint from
-`.github/workflows/ci.yml`. `agent/proof-lanes.toml` is the machine-readable copy
-of this table; `agent/test-map.json` routes each owned path to the narrowest lane.
+<lane>`. Hosted jobs invoke that dispatcher too. The local `required` gate runs
+the source admission and five atomic lanes sequentially; hosted CI runs the five
+lanes in parallel after source admission and converges through `CI / required`.
 
 | Lane | Command | What it proves | Rerun command |
 | --- | --- | --- | --- |
-| fast | `ops/ci/fast.sh` | `cargo fmt --all --check` plus `cargo nextest run --locked --workspace --profile fast` (`.config/nextest.toml`: fail-fast, 20 s slow-timeout, terminate after 2) | `bash scripts/ci-local.sh fast` |
-| required | `ops/ci/required.sh` | `ops/ci/local-parity-test.sh` (pre-push hook, `quality-gates.sh`, `ci-doctor.sh`, and Justfile controls), the fast lane, then `cargo clippy --locked --workspace --all-targets -- -D warnings` | `bash scripts/ci-local.sh required` |
-| contract | `ops/ci/contract.sh` | the whole workspace under the nextest `contract` profile: real local Git repositories per test and the spawned daemon round trip (45 s slow-timeout, no fail-fast, `num-cpus` threads) | `bash scripts/ci-local.sh contract` |
-| security | `ops/ci/security.sh` (adapter: `tools/security-lane.sh`) | `gitleaks detect --source . --no-git --redact --no-banner` and `cargo deny check bans`; both tools are pinned in `agent/security-policy.toml` and fail closed when absent | `bash scripts/ci-local.sh security` |
+| source-scan | `ops/ci/source-scan.sh` | gitleaks 8.21.2 scans the current source and lockfiles before project dependencies are installed | `bash scripts/ci-local.sh source-scan` |
+| fast | `ops/ci/fast.sh` | exactly 32 types/journal cases; nonzero assertion and sanitized JUnit | `bash scripts/ci-local.sh fast` |
+| lint | `ops/ci/lint.sh` | format, strict Clippy, actionlint 1.7.8, zizmor 1.25.2, ShellCheck 0.10.0, and meta-guards proving 32 + 109 = all 141 tests | `bash scripts/ci-local.sh lint` |
+| contract | `ops/ci/contract.sh` | exactly 109 workspace/daemon cases, including real local Git and the daemon round trip; nonzero assertion and sanitized JUnit | `bash scripts/ci-local.sh contract` |
+| security | `ops/ci/security.sh` | synthetic finding canary plus all cargo-deny license, advisory, ban, and source policies against a fresh RustSec database | `bash scripts/ci-local.sh security` |
+| docs | `ops/ci/docs.sh` | relative links, warning-denied rustdoc, and doctests | `bash scripts/ci-local.sh docs` |
+| required | `ops/ci/required.sh` | source admission followed by fast, lint, contract, security, and docs exactly once | `bash scripts/ci-local.sh required` |
 | audit | `ops/ci/audit.sh` | the local Jankurai full score against the upward-only `AUDIT_FLOOR` ratchet, failing on critical findings | `bash ops/ci/audit.sh` |
 | nightly | `ops/ci/nightly.sh` | nothing yet: unset `BULLET_LIVE_GITD` exits **78** (unregistered, not green); set, it exits **1** because no live `jeryu-gitd` oracle adapter exists | `bash scripts/ci-local.sh nightly` |
 
@@ -38,6 +41,9 @@ so hosted CI, the local lanes, and the hook can never drift apart.
 | `.jankurai/repo-score.json` | audit lane | machine-readable score, caps, and findings; each finding carries its own `rerun_command` and `docs_url` |
 | `.jankurai/repo-score.md` | audit lane | the same report for humans |
 | `.jankurai/repair-queue.jsonl` | audit lane | one repair task per finding, so the next agent starts from the exact path and lane instead of re-deriving it |
+| `.ci-artifacts/observations/<lane>.json` | hosted/local dispatcher | unsigned `bullet.ci-observation.v1` diagnostic with commit/tree, cleanliness, commands, versions, outcome, and artifact hashes; never Bullet Evidence |
+| `.ci-artifacts/reports/{fast,contract}.junit.xml` | nextest | sanitized test report uploaded only with its matching observation |
+| `.ci-artifacts/reports/coverage.lcov` | scheduled coverage | scheduled diagnostic only; no release or mutation authority |
 
 `.jankurai/` is gitignored lane output, never source: recreate it with
 `bash ops/ci/audit.sh`. Failures are typed, not free text — every refusal carries
@@ -63,11 +69,11 @@ routable without reading the implementation first:
   repair task; in code the equivalent is the typed `thiserror` variant plus the
   lane that reproduces it.
 
-Common fixes, by lane: a red fast lane is formatting or a unit fact — rerun
-`bash scripts/ci-local.sh fast`; a red required lane that is green under fast is a
-Clippy or local-parity control; a red contract lane is a real-Git or daemon
+Common fixes, by lane: a red fast lane is a types/journal fact; a red lint lane
+is format, Clippy, workflow policy, or inventory drift; a red contract lane is a real-Git or daemon
 behavior and must never be repaired by widening `SafeGit`, `protocol.file.allow`,
-or the hostile-config refusals; a red audit lane is a score regression below
+or the hostile-config refusals; security can refuse an absent/stale advisory DB
+and requires network to refresh it; a red audit lane is a score regression below
 `AUDIT_FLOOR` and is repaired from `.jankurai/repair-queue.jsonl`, never by
 lowering the floor.
 
@@ -91,22 +97,25 @@ mutation), `clone_safety.rs` and `mirror_clone.rs`, `cas.rs`,
   `scripts/ci-doctor.sh` for pinned versions). Do not add `|| true`,
   `continue-on-error`, or a fallback.
 - Exit 78 from the nightly lane is "unregistered", never success.
+- `ops/ci/aggregate.sh` rejects failed, skipped, cancelled, or missing jobs and
+  missing observations; `aggregate-test.sh` proves every branch.
 - No `#[ignore]` to get past a platform gap: when a primitive is missing the code
   returns a typed unsupported error and the test asserts that error.
 - `AUDIT_FLOOR` in `ops/ci/audit.sh` only ever rises.
 
 ## Budgets and stop conditions
 
-Every lane is local, offline, and bounded, so this component has no paid or
-metered surface and no spend cap is meaningful; the budget that matters is time
-and process containment, and it is enforced, not documented:
+The component has no paid or metered surface. Test, lint, docs, coverage, and
+platform-refusal behavior is local; security/advisory refresh and scheduled
+external-link checks use outbound network and fail red when truth is unavailable.
 
 - Time budget: nextest slow-timeout terminates a test after 2 periods (20 s fast,
-  30 s default, 45 s contract). Hosted jobs carry a 10-15 minute timeout.
+  30 s default, 45 s contract). Hosted jobs carry a 5-25 minute timeout.
 - Quota: no provider, model, or metered API is called from any lane. The word
   "token" in this repository means an authority token, never an API billing unit;
   `agent/audit-policy.toml` declares the empty cost surface explicitly.
-- Network stop condition: lanes never reach a forge. `ops/ci/lib.sh` exports
+- Network stop condition: no lane mutates a forge. RustSec refresh and scheduled
+  link checks are read-only exceptions. `ops/ci/lib.sh` exports
   `GIT_TERMINAL_PROMPT=0` and `SafeGit` forces `protocol.file.allow=never`
   (`user` only for the single mirror-to-clone call), an empty `core.hooksPath`,
   an empty `credential.helper`, and a denying `GIT_ASKPASS`.

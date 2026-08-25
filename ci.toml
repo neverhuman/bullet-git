@@ -1,0 +1,58 @@
+# Forge-neutral Jeryu job graph. This file is inert until forge and runner
+# admission are ratified; declaring it registers no runner or protected check.
+# The required job refuses with exit 78 until Jeryu exposes ratified predecessor
+# outcomes to the same fail-closed aggregator used by the GitHub mirror.
+
+[[job]]
+id = "source_scan"
+name = "source scan"
+runner_class = "native-rust-clean"
+run = ["bash scripts/ci-local.sh source-scan"]
+artifact_paths = [".ci-artifacts/observations/source-scan.json"]
+
+[[job]]
+id = "fast"
+name = "fast"
+runner_class = "native-rust-clean"
+needs = ["source_scan"]
+run = ["bash scripts/ci-local.sh fast"]
+artifact_paths = [".ci-artifacts/observations/fast.json", ".ci-artifacts/reports/fast.junit.xml"]
+
+[[job]]
+id = "lint"
+name = "lint"
+runner_class = "native-rust-clean"
+needs = ["source_scan"]
+run = ["bash scripts/ci-local.sh lint"]
+artifact_paths = [".ci-artifacts/observations/lint.json"]
+
+[[job]]
+id = "contract"
+name = "contract"
+runner_class = "native-rust-clean"
+needs = ["source_scan"]
+run = ["bash scripts/ci-local.sh contract"]
+artifact_paths = [".ci-artifacts/observations/contract.json", ".ci-artifacts/reports/contract.junit.xml"]
+
+[[job]]
+id = "security"
+name = "security"
+runner_class = "native-rust-clean"
+needs = ["source_scan"]
+run = ["bash scripts/ci-local.sh security"]
+artifact_paths = [".ci-artifacts/observations/security.json"]
+
+[[job]]
+id = "docs"
+name = "docs"
+runner_class = "native-rust-clean"
+needs = ["source_scan"]
+run = ["bash scripts/ci-local.sh docs"]
+artifact_paths = [".ci-artifacts/observations/docs.json"]
+
+[[job]]
+id = "required"
+name = "CI / required"
+runner_class = "native-rust-clean"
+needs = ["source_scan", "fast", "lint", "contract", "security", "docs"]
+run = ["bash ops/ci/jeryu-required.sh"]

@@ -2,6 +2,7 @@
   "workspace": "bullet-git",
   "owners": {
     ".bullet-family/": "ops",
+    ".ci-artifacts/": "ops",
     ".config/": "ops",
     ".github/": "ops",
     ".gitignore": "ops",
@@ -15,6 +16,7 @@
     "README.md": "docs",
     "SPLIT.md": "split",
     "agent/": "agent",
+    "ci.toml": "ops",
     "crates/": "git",
     "deny.toml": "ops",
     "docs/": "docs",

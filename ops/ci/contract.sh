@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Contract lane: the full workspace suite under the nextest contract profile, including the
-# real-Git integration suites and the spawned daemon round trip. Local processes only; no network.
+# Contract lane: all workspace and daemon tests, including real local Git and
+# the spawned daemon round trip. Local subprocesses only; no forge network.
 set -euo pipefail
+# shellcheck source=ops/ci/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
-log "contract lane: local capability API and daemon process"
-run_tests contract
+log "contract lane: workspace capability API and daemon process partition"
+run_partition contract contract "$CONTRACT_FILTER" "$CONTRACT_EXPECTED_TESTS"
 log "contract lane passed"

@@ -2,6 +2,7 @@
 # Jankurai audit lane. Writes .jankurai/repo-score.{json,md} and repair-queue.jsonl.
 # AUDIT_FLOOR is a ratchet: it may only rise. Missing auditor fails closed.
 set -euo pipefail
+# shellcheck source=ops/ci/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
 AUDIT_FLOOR=65
