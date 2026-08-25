@@ -12,13 +12,40 @@ its script; the workflow and the Justfile stay thin.
 | fast | `ops/ci/fast.sh` | `cargo fmt --all --check`; `cargo nextest run --locked --workspace --profile fast` (`.config/nextest.toml`: fail-fast, 20 s slow-timeout, terminate after 2) | rustc 1.97.1 (`rust-toolchain.toml`), rustfmt, cargo-nextest 0.9.137 |
 | required | `ops/ci/required.sh` | `ops/ci/local-parity-test.sh` (asserts the pre-push hook, `quality-gates.sh`, `ci-doctor.sh`, and Justfile controls); fast; `cargo clippy --locked --workspace --all-targets -- -D warnings` | fast plus clippy |
 | contract | `ops/ci/contract.sh` | nextest `contract` profile over the whole workspace: the real local Git suites and the spawned daemon round trip; 45 s slow-timeout, no fail-fast, `num-cpus` threads; local processes only, no network | rustc, cargo-nextest, and a `git` binary on `PATH` (not checked by ci-doctor) |
-| security | `ops/ci/security.sh` | `gitleaks detect --source . --no-git --redact`; `cargo deny check bans` (license gating is not enforced until a `deny.toml` policy is committed; none exists today) | gitleaks 8.21.2, cargo-deny 0.19.8 |
+| security | `ops/ci/security.sh` | `gitleaks detect --source . --no-git --redact`; `cargo deny fetch db` and a lane-side freshness proof of the RustSec database; `cargo deny --locked check licenses advisories bans sources` against the committed `deny.toml`; `zizmor .` | gitleaks 8.21.2, cargo-deny 0.19.8, zizmor 1.25.2, `cargo`, `git` |
 | audit | `ops/ci/audit.sh` | `jankurai audit . --no-score-history --fail-under $AUDIT_FLOOR --fail-on critical` with `AUDIT_FLOOR=56`; artifacts in `.jankurai/` | jankurai 1.6.11; local/release only, not in `ci.yml` |
 | nightly | `ops/ci/nightly.sh` | see the next section | bash only |
 
+## Security lane policy
+
+`deny.toml` at the repository root is the committed supply-chain policy and is
+the only place a license, advisory, ban, or source exception may be written;
+each entry carries the crate that justifies it. The lane runs
+`cargo deny --locked check licenses advisories bans sources`, so all four
+checks fail closed together. There is no separate "licenses are not gated yet"
+state any more.
+
+The advisory database is cloned into `target/advisory-db` (ignored) rather than
+into the ambient `CARGO_HOME`, and the lane proves its freshness itself: it
+reads the database's newest commit and refuses at 14 days
+(`ADVISORY_DB_ABSENT` / `ADVISORY_DB_UNREADABLE` / `ADVISORY_DB_STALE`, exit 1).
+That check exists because cargo-deny 0.19.8 fetches through the git CLI and
+reads a non-zero `git` exit as success, so a failed fetch alone cannot fail the
+check on a host that already has a database, and `maximum-db-staleness` cannot
+see it either because a failed `git fetch` still rewrites `FETCH_HEAD`. Never
+replace that gate with a `|| true`, a skip, or a wider age limit to get a green
+run on an offline host: an unrefreshed database means the scan is not trusted.
+
+`zizmor .` audits the workflow bytes. Without a GitHub API token it skips its
+five online audits (impostor-commit, ref-confusion, known-vulnerable-actions,
+stale-action-refs, ref-version-mismatch) and prints that it is doing so; the
+offline audits still fail the lane on a finding. Do not add a token to make the
+online audits run from a proof lane.
+
 Hosted `ci.yml` runs fast, required, contract, and security with pinned
 installs (`dtolnay/rust-toolchain` 1.97.1, `taiki-e/install-action` for
-cargo-nextest 0.9.137 and cargo-deny 0.19.8, sha256-checked gitleaks 8.21.2);
+cargo-nextest 0.9.137, cargo-deny 0.19.8 and zizmor 1.25.2, sha256-checked
+gitleaks 8.21.2);
 every action is pinned to a full commit SHA and checkouts use
 `persist-credentials: false`. It never installs Playwright and never reaches
 a forge.
