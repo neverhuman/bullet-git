@@ -11,7 +11,7 @@ requires_network = false
 [[lane]]
 name = "fast"
 command = "just fast"
-purpose = "32-case nonzero types/journal nextest partition with sanitized JUnit"
+purpose = "43-case nonzero types/journal nextest partition with sanitized JUnit"
 requires_network = false
 
 [[lane]]
@@ -23,7 +23,7 @@ requires_network = false
 [[lane]]
 name = "contract"
 command = "just contract"
-purpose = "109-case nonzero workspace/daemon partition including real Git and spawned-daemon suites"
+purpose = "126-case nonzero workspace/daemon partition including real Git and spawned-daemon suites"
 requires_network = false
 
 [[lane]]
