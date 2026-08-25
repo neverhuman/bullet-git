@@ -117,12 +117,23 @@ fn self_authored_token_cannot_create_a_workspace() {
 fn oversized_stdio_frame_is_refused_before_json_parsing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut conversation = spawn_daemon(temp.path());
-    conversation
-        .stdin
-        .write_all(&vec![b'x'; MAX_FRAME_BYTES + 1])
-        .expect("write oversized frame");
-    conversation.stdin.write_all(b"\n").expect("delimiter");
-    conversation.stdin.flush().expect("flush frame");
+    let mut frame = vec![b'x'; MAX_FRAME_BYTES + 1];
+    frame.push(b'\n');
+    for (context, result) in [
+        (
+            "write oversized frame",
+            conversation.stdin.write_all(&frame),
+        ),
+        ("flush oversized frame", conversation.stdin.flush()),
+    ] {
+        if let Err(error) = result {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "{context}: {error}"
+            );
+        }
+    }
     let mut line = String::new();
     conversation
         .reader

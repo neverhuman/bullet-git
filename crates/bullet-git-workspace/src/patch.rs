@@ -4,10 +4,12 @@ use crate::scope::ScopeGrant;
 use crate::CapabilityError;
 use std::collections::{HashMap, HashSet};
 
-/// Frozen wire-contract bound for operations in one proposal.
-pub const MAX_PATCH_OPERATIONS: usize = 1_024;
+/// Policy bound for unique changed paths in one proposal.
+pub const MAX_PATCH_OPERATIONS: usize = 128;
 /// Frozen wire-contract bound for one replacement body.
 pub const MAX_CONTENT_BYTES: usize = 1_048_576;
+/// Policy bound for the sum of replacement bodies in one proposal.
+pub const MAX_AGGREGATE_CONTENT_BYTES: usize = 32 * 1_048_576;
 
 /// One patch operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +76,7 @@ pub fn validate_batch(
     let mut normalized = Vec::with_capacity(patches.len());
     let mut seen: HashSet<String> = HashSet::new();
     let mut portable: HashMap<String, String> = HashMap::new();
+    let mut aggregate_content_bytes = 0_usize;
     for patch in patches {
         let path = grant.check(&patch.path)?;
         if let PatchOp::Write(contents) = &patch.op {
@@ -82,6 +85,18 @@ pub fn validate_batch(
                     path,
                     max: MAX_CONTENT_BYTES,
                     actual: contents.len(),
+                });
+            }
+            aggregate_content_bytes = aggregate_content_bytes.checked_add(contents.len()).ok_or(
+                CapabilityError::AggregateContentTooLarge {
+                    max: MAX_AGGREGATE_CONTENT_BYTES,
+                    actual: usize::MAX,
+                },
+            )?;
+            if aggregate_content_bytes > MAX_AGGREGATE_CONTENT_BYTES {
+                return Err(CapabilityError::AggregateContentTooLarge {
+                    max: MAX_AGGREGATE_CONTENT_BYTES,
+                    actual: aggregate_content_bytes,
                 });
             }
         }
@@ -181,5 +196,48 @@ mod tests {
         .expect_err("content refused");
         assert_eq!(error.reason_code(), "CONTENT_TOO_LARGE");
         assert!(error.to_string().contains("src/huge.rs"));
+    }
+
+    #[test]
+    fn exact_path_and_aggregate_content_bounds_are_admitted() {
+        let patches = (0..MAX_PATCH_OPERATIONS)
+            .map(|index| PatchHunk::write(format!("src/{index}.rs"), Vec::new()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validate_batch(&grant(), &patches, |_| false).expect("exact path bound"),
+            (0..MAX_PATCH_OPERATIONS)
+                .map(|index| format!("src/{index}.rs"))
+                .collect::<Vec<_>>()
+        );
+
+        let patches = (0..(MAX_AGGREGATE_CONTENT_BYTES / MAX_CONTENT_BYTES))
+            .map(|index| {
+                PatchHunk::write(
+                    format!("src/aggregate-{index}.bin"),
+                    vec![0; MAX_CONTENT_BYTES],
+                )
+            })
+            .collect::<Vec<_>>();
+        validate_batch(&grant(), &patches, |_| false).expect("exact aggregate bound");
+    }
+
+    #[test]
+    fn aggregate_content_over_bound_is_typed() {
+        let full_files = MAX_AGGREGATE_CONTENT_BYTES / MAX_CONTENT_BYTES;
+        let mut patches = (0..full_files)
+            .map(|index| {
+                PatchHunk::write(
+                    format!("src/aggregate-{index}.bin"),
+                    vec![0; MAX_CONTENT_BYTES],
+                )
+            })
+            .collect::<Vec<_>>();
+        patches.push(PatchHunk::write("src/one-byte-over.bin", vec![0]));
+
+        let error = validate_batch(&grant(), &patches, |_| false).expect_err("aggregate refused");
+        assert_eq!(error.reason_code(), "AGGREGATE_CONTENT_TOO_LARGE");
+        assert!(error
+            .to_string()
+            .contains(&(MAX_AGGREGATE_CONTENT_BYTES + 1).to_string()));
     }
 }

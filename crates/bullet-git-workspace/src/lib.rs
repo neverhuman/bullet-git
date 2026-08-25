@@ -33,7 +33,10 @@ pub use gc::{pin_retained_object, retention_ref_exists, RetentionClass, Retentio
 pub use generation::GenerationError;
 pub use lineage::WorkspaceLineage;
 pub use mirror::{mirror_dir, MirrorLock, LOCK_MAX_WAIT, LOCK_STALE_AFTER};
-pub use patch::{validate_batch, PatchHunk, PatchOp, MAX_CONTENT_BYTES, MAX_PATCH_OPERATIONS};
+pub use patch::{
+    validate_batch, PatchHunk, PatchOp, MAX_AGGREGATE_CONTENT_BYTES, MAX_CONTENT_BYTES,
+    MAX_PATCH_OPERATIONS,
+};
 pub use preservation::{PreservationAuthority, PreservationError, PreservationReceipt};
 pub use reflink::{copy_tree_byte_identical, copy_tree_prefers_reflink, CopyMode};
 pub use repository::{AgentRepository, CommitIdentity, ExpectedAuthority, RealRepository};
@@ -103,6 +106,14 @@ pub enum CapabilityError {
         /// Admitted upper bound.
         max: usize,
         /// Received content length.
+        actual: usize,
+    },
+    /// The sum of all write bodies exceeded the admitted byte bound.
+    #[error("aggregate patch contents too large: {actual} bytes exceeds {max}")]
+    AggregateContentTooLarge {
+        /// Admitted aggregate upper bound.
+        max: usize,
+        /// Received aggregate content length.
         actual: usize,
     },
     /// Two paths collide after portable case folding.
@@ -193,6 +204,7 @@ impl CapabilityError {
             Self::DuplicatePath(_) => "DUPLICATE_PATH",
             Self::InvalidOperationCount { .. } => "INVALID_OPERATION_COUNT",
             Self::ContentTooLarge { .. } => "CONTENT_TOO_LARGE",
+            Self::AggregateContentTooLarge { .. } => "AGGREGATE_CONTENT_TOO_LARGE",
             Self::PathCollision { .. } => "PATH_COLLISION",
             Self::SymlinkForbidden(_) => "SYMLINK_FORBIDDEN",
             Self::WorktreeForbidden(_) => "WORKTREE_FORBIDDEN",
