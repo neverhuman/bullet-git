@@ -161,10 +161,9 @@ impl PatchProposal {
                 });
             }
         }
-        let paths = paths.values().copied().collect::<Vec<_>>();
-        for (index, left) in paths.iter().enumerate() {
-            for right in &paths[index + 1..] {
-                if contains_path(left, right) || contains_path(right, left) {
+        for (index, (left_key, left)) in paths.iter().enumerate() {
+            for (right_key, right) in paths.iter().skip(index + 1) {
+                if contains_path(left_key, right_key) || contains_path(right_key, left_key) {
                     return Err(ProposalError::PathConflict {
                         first: (*left).to_owned(),
                         second: (*right).to_owned(),
@@ -291,16 +290,24 @@ mod tests {
 
     #[test]
     fn canonical_json_shape_round_trips_and_denies_unknown_fields() {
-        let proposal = proposal(vec![write("src/lib.rs", Preimage::Absent)]);
-        let value = serde_json::to_value(&proposal).expect("encode");
-        assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["operations"][0]["preimage"]["kind"], "absent");
-        assert_eq!(value["operations"][0]["mutation"]["kind"], "write");
-        assert_eq!(value["operations"][0]["mutation"]["content_utf8"], "next");
-        assert_eq!(
-            serde_json::from_value::<PatchProposal>(value).expect("decode"),
-            proposal
-        );
+        let expected = serde_json::json!({
+            "schema_version": 1,
+            "proposal_id": format!("cnt_{}", "1".repeat(64)),
+            "producing_attempt_id": format!("atm_{}", "2".repeat(64)),
+            "base_checkpoint_id": format!("ckp_{}", "3".repeat(64)),
+            "base_checkpoint_digest": "04".repeat(32),
+            "operations": [{
+                "path": "PONG.txt",
+                "preimage": { "kind": "absent" },
+                "mutation": { "kind": "write", "content_utf8": "PONG\n" }
+            }],
+            "gate_ids": [format!("gat_{}", "5".repeat(64))]
+        });
+        assert_eq!(expected.as_object().expect("object").len(), 7);
+
+        let proposal = serde_json::from_value::<PatchProposal>(expected.clone()).expect("decode");
+        proposal.validate().expect("validate");
+        assert_eq!(serde_json::to_value(&proposal).expect("encode"), expected);
 
         let mut unknown = serde_json::to_value(&proposal).expect("encode");
         unknown["model_comment"] = serde_json::json!("not authoritative");
@@ -336,13 +343,20 @@ mod tests {
                 .reason_code(),
             "GATE_REQUIRED"
         );
-        let conflict = proposal(vec![
-            write("src", Preimage::Absent),
-            write("src/lib.rs", Preimage::Absent),
-        ]);
-        assert_eq!(
-            conflict.validate().expect_err("conflict").reason_code(),
-            "PATH_CONFLICT"
-        );
+        for (parent, child) in [
+            ("src", "src/lib.rs"),
+            ("Src", "src/lib.rs"),
+            ("Étage", "étage/file.rs"),
+        ] {
+            let conflict = proposal(vec![
+                write(parent, Preimage::Absent),
+                write(child, Preimage::Absent),
+            ]);
+            assert_eq!(
+                conflict.validate().expect_err("conflict").reason_code(),
+                "PATH_CONFLICT",
+                "accepted portable ancestor conflict {parent:?} and {child:?}"
+            );
+        }
     }
 }
