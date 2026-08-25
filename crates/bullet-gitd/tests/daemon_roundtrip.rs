@@ -133,3 +133,17 @@ fn oversized_stdio_frame_is_refused_before_json_parsing() {
     assert_eq!(response["err"]["code"], "FRAME_TOO_LARGE");
     conversation.finish();
 }
+
+#[test]
+fn production_binary_rejects_unknown_arguments() {
+    let out = Command::new(env!("CARGO_BIN_EXE_bullet-gitd"))
+        .arg("--fixture-authority")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown argument"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

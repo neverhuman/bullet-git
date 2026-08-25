@@ -6,6 +6,10 @@ use serde_json::Value;
 use std::io::Write;
 
 fn main() {
+    if let Some(arg) = std::env::args().nth(1) {
+        eprintln!("bullet-gitd: unknown argument {arg}");
+        std::process::exit(2);
+    }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();

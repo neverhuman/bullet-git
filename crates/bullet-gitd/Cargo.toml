@@ -4,9 +4,23 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+autobins = false
 
 [lints]
 workspace = true
+
+[features]
+default = []
+fixture-authority = []
+
+[[bin]]
+name = "bullet-gitd"
+path = "src/main.rs"
+
+[[bin]]
+name = "bullet-gitd-fixture"
+path = "src/bin/fixture_main.rs"
+required-features = ["fixture-authority"]
 
 [dependencies]
 bullet-git-types.workspace = true
@@ -21,4 +35,6 @@ thiserror.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+hex.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true

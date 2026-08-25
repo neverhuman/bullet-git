@@ -92,7 +92,16 @@ pub struct Daemon {
     session: Option<Session>,
     authority: AuthorityGateway,
     mutation_frozen: bool,
+    #[cfg(feature = "fixture-authority")]
+    fixture_root: Option<std::path::PathBuf>,
 }
+
+#[cfg(feature = "fixture-authority")]
+pub use crate::authority_gateway::{
+    consume_fixture_generation, destination_is_fixture_root, mint_fixture_permit,
+    parse_fixture_key, require_preopened_fixture_root, verify_fixture_permit, FixturePermit,
+    FixturePermitClaims, FixturePermitError,
+};
 
 impl Default for Daemon {
     fn default() -> Self {
@@ -112,7 +121,33 @@ impl Daemon {
             session: None,
             authority: AuthorityGateway::unavailable(),
             mutation_frozen: false,
+            #[cfg(feature = "fixture-authority")]
+            fixture_root: None,
         }
+    }
+
+    /// Demo-only daemon bound to one pre-opened fixture root and MAC permit.
+    ///
+    /// `new()` stays fail-closed. Compiled only under `fixture-authority`.
+    ///
+    /// # Errors
+    ///
+    /// Root is missing/unsafe, the permit MAC does not verify, or the
+    /// mutation ledger cannot open.
+    #[cfg(feature = "fixture-authority")]
+    pub fn fixture(
+        fixture_root: &Path,
+        key: [u8; 32],
+        permit: FixturePermit,
+    ) -> Result<Self, String> {
+        let fixture_root = require_preopened_fixture_root(fixture_root)?;
+        Ok(Self {
+            session: None,
+            authority: AuthorityGateway::fixture(&fixture_root, key, permit)
+                .map_err(|error| format!("{}: {error}", error.reason_code()))?,
+            mutation_frozen: false,
+            fixture_root: Some(fixture_root),
+        })
     }
 
     /// Handle one request line and produce one response line.
@@ -254,6 +289,17 @@ impl Daemon {
         let envelope = protocol::envelope(&req.token);
         let token = WireAuthorityToken::parse(&envelope.token).map_err(|e| auth(&e))?;
         let params: CloneParams = parse_params(&req.params)?;
+        #[cfg(feature = "fixture-authority")]
+        if let Some(fixture_root) = &self.fixture_root {
+            if !destination_is_fixture_root(Path::new(&params.root), fixture_root) {
+                return Err((
+                    "FIXTURE_DESTINATION_REFUSED".into(),
+                    "clone root must be the pre-opened fixture root".into(),
+                ));
+            }
+            consume_fixture_generation(fixture_root)
+                .map_err(|error| ("FIXTURE_GENERATION_CONSUMED".into(), error))?;
+        }
         let clone_req = CloneRequest {
             source_repo: Path::new(&params.source_repo),
             base_sha: &params.base_sha,
