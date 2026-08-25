@@ -29,3 +29,6 @@ hooks-install:
 
 nightly:
     bash scripts/ci-local.sh nightly
+
+toolchain-msrv:
+    bash scripts/ci-local.sh toolchain-msrv

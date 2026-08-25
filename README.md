@@ -42,13 +42,15 @@ simulated inside BulletGit.
 | fast | `just fast` | fmt check plus nextest `fast` profile |
 | required | `just check` | local parity controls (`ops/ci/local-parity-test.sh`), fast, then clippy `-D warnings` |
 | contract | `just contract` | nextest `contract` profile: real local Git suites and the daemon round trip, in-process |
-| security | `just security` | gitleaks (no-git) plus `cargo deny check bans`; a missing tool fails |
+| security | `just security` | gitleaks (no-git); `cargo deny fetch db` plus a lane-side freshness proof of the RustSec advisory database (refuses at 14 days); `cargo deny --locked check licenses advisories bans sources` against the committed `deny.toml`; `zizmor .`; a missing tool, a missing `deny.toml`, or an absent/stale advisory database fails |
 | audit | `bash ops/ci/audit.sh` | Jankurai audit against a committed ratchet floor (`AUDIT_FLOOR=56`); artifacts under `.jankurai/` |
 | nightly | `bash ops/ci/nightly.sh` | explicit local entrypoint for a future live `jeryu-gitd` oracle: with `BULLET_LIVE_GITD` unset it logs that no live gitd lane is registered and exits 78 (unregistered, not success); with it set it exits 1 because no oracle adapter is registered; no hosted schedule exists |
+| toolchain-msrv | `just toolchain-msrv` | builds and tests the whole workspace under rustup toolchain 1.95.0, the family MSRV named by the Hub release contract, while `rust-toolchain.toml`, `scripts/ci-doctor.sh`, and hosted CI stay pinned to 1.97.1. Runs the exact receipt argv from the Hub MSRV schema (`cargo build --workspace --all-targets --locked`, then `cargo test --workspace --all-targets --locked --no-fail-fast`, with `CARGO_INCREMENTAL=0`, `CARGO_NET_OFFLINE=true`, `RUSTC=<absolute 1.95.0 rustc>`, `RUSTUP_TOOLCHAIN=1.95.0`) in the isolated `target/toolchain-1.95.0/`, then writes the ignored machine-local observation `.bullet-family/toolchain-1.95.0-bullet-git.json` beside its two raw output logs. A missing rustup toolchain, `b3sum` 1.8.2, or `jq` is a typed refusal (exit 1), never a skip; a red build or test fails the lane after the observation is written. Compile and test only: no fmt or clippy. The observation is an input for a future operator-signed `release.rust-msrv-1-95` receipt, never itself a receipt |
 
 `.github/workflows/ci.yml` runs the fast, required, contract, and security
 scripts unchanged with pinned rustc 1.97.1, cargo-nextest 0.9.137, cargo-deny
-0.19.8, and gitleaks 8.21.2; audit and nightly are local-only lanes. Local
-runners must provide `cargo-nextest`, `gitleaks`, `cargo-deny`, and
-`jankurai`; `scripts/ci-doctor.sh <lane>` checks the pinned versions. Lane
+0.19.8, gitleaks 8.21.2, and zizmor 1.25.2; audit, nightly, and
+`toolchain-msrv` are local-only lanes. Local runners must provide
+`cargo-nextest`, `gitleaks`, `cargo-deny`, `zizmor`, and `jankurai`;
+`scripts/ci-doctor.sh <lane>` checks the pinned versions. Lane
 rules are in [`ops/AGENTS.md`](ops/AGENTS.md).
