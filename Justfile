@@ -2,8 +2,8 @@ default:
     @just --list
 
 setup:
-    rustup component add rustfmt clippy
     bash scripts/ci-local.sh source-scan
+    rustup component add rustfmt clippy
     cargo fetch --locked
 
 fast:

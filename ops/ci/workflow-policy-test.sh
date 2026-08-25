@@ -53,4 +53,11 @@ grep -q 'runs-on: macos-15' "$scheduled"
 grep -q 'name: Windows compile and typed refusal' "$scheduled"
 grep -q 'runs-on: windows-2025' "$scheduled"
 grep -q 'fetch-depth: 0' "$scheduled"
+source_scan_line="$(grep -n -m1 '^[[:space:]]*bash scripts/ci-local.sh source-scan$' Justfile | cut -d: -f1)"
+rustup_line="$(grep -n -m1 '^[[:space:]]*rustup component add rustfmt clippy$' Justfile | cut -d: -f1)"
+cargo_fetch_line="$(grep -n -m1 '^[[:space:]]*cargo fetch --locked$' Justfile | cut -d: -f1)"
+if (( source_scan_line >= rustup_line || source_scan_line >= cargo_fetch_line )); then
+  echo '[ci] SETUP_SOURCE_SCAN_ORDER_DRIFT' >&2
+  exit 1
+fi
 log "workflow policy: triggers, pins, exact-run artifacts, expected commit, and aggregator are exact"
