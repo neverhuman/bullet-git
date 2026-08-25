@@ -2,7 +2,7 @@
 
 mod support;
 
-use bullet_git_workspace::{CloneRequest, FileProtocol, PrivateClone, WorkspaceManifest};
+use bullet_git_workspace::{CloneRequest, CopyMode, FileProtocol, PrivateClone, WorkspaceManifest};
 use support::{clone_workspace, init_source, ATTEMPT, CREATED_AT, NONCE, VARIANT};
 
 #[test]
@@ -32,11 +32,21 @@ fn clone_has_no_remote_and_manifest_lives_outside_the_tree() {
     let manifest = workspace.manifest();
     assert_eq!(manifest.nonce_hex, hex::encode(NONCE));
     assert_eq!(manifest.created_at, CREATED_AT);
+    assert!(matches!(
+        manifest.object_materialization,
+        CopyMode::Reflink | CopyMode::Fallback
+    ));
 
     let manifest_json = std::fs::read(manifest_path).expect("manifest bytes");
     let mut legacy: serde_json::Value = serde_json::from_slice(&manifest_json).expect("json");
     legacy["base_sha"] = serde_json::Value::String(base[5..].to_string());
     assert!(serde_json::from_value::<WorkspaceManifest>(legacy).is_err());
+    let mut incomplete: serde_json::Value = serde_json::from_slice(&manifest_json).expect("json");
+    incomplete
+        .as_object_mut()
+        .expect("manifest object")
+        .remove("object_materialization");
+    assert!(serde_json::from_value::<WorkspaceManifest>(incomplete).is_err());
     let mut unknown: serde_json::Value = serde_json::from_slice(&manifest_json).expect("json");
     unknown["unexpected"] = serde_json::Value::Bool(true);
     assert!(serde_json::from_value::<WorkspaceManifest>(unknown).is_err());

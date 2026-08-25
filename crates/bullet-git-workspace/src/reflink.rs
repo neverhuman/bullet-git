@@ -1,10 +1,11 @@
 //! Reflink-or-fallback tree copy for private clone materialization.
 //!
-//! On a CoW filesystem, `cp --reflink=always` is the fast path. Anywhere that
-//! command cannot prove a reflink, the fallback walks regular files so the
+//! On a CoW filesystem, Linux `FICLONE` is the fast path. Anywhere that
+//! primitive cannot prove a reflink, the fallback walks regular files so the
 //! destination is byte-identical and later mirror GC cannot reach it.
 
 use crate::{io_err, CapabilityError};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -13,9 +14,10 @@ use std::path::Path;
 use std::os::unix::fs::MetadataExt as _;
 
 /// Which copy path produced the destination tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CopyMode {
-    /// `cp --reflink=always` succeeded.
+    /// Linux `FICLONE` succeeded for every regular file.
     Reflink,
     /// Byte-identical walk copy after reflink was refused.
     Fallback,

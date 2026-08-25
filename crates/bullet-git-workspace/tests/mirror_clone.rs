@@ -2,12 +2,12 @@
 
 mod support;
 
-use bullet_git_workspace::{mirror_dir, MirrorLock};
+use bullet_git_workspace::{mirror_dir, CopyMode, MirrorLock};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use support::{clone_workspace, fixture_git, init_source, sha1_oid};
+use support::{clone_workspace, fixture_git, init_source, sha1_oid, try_clone_workspace};
 
 fn lock_file_for(mirror: &Path) -> PathBuf {
     let name = mirror.file_name().expect("mirror name").to_string_lossy();
@@ -27,14 +27,39 @@ fn clone_goes_through_a_dissociated_mirror() {
             .repo_dir()
             .join(".git/objects/info/alternates")
             .exists(),
-        "no alternates file may survive --dissociate"
+        "no alternates file may survive materialization"
     );
+    assert!(matches!(
+        workspace.manifest().object_materialization,
+        CopyMode::Reflink | CopyMode::Fallback
+    ));
+    let remotes = workspace
+        .git()
+        .run(
+            Some(workspace.repo_dir()),
+            bullet_git_workspace::FileProtocol::Never,
+            &["remote"],
+            &[],
+        )
+        .expect("list remotes")
+        .text();
+    assert!(remotes.is_empty(), "materialization creates no remote");
     assert_eq!(workspace.base_sha(), base);
     assert_eq!(
         workspace.manifest().mirror_dir,
         mirror.to_string_lossy(),
         "manifest records the mirror"
     );
+
+    let source_objects = src.join(".git").join("objects");
+    std::fs::write(
+        mirror.join("objects").join("info").join("alternates"),
+        format!("{}\n", source_objects.display()),
+    )
+    .expect("plant valid mirror alternates dependency");
+    let error = try_clone_workspace(tmp.path(), &src, &base, "atm_mirror_alternates")
+        .expect_err("alternate-backed mirror must be refused");
+    assert_eq!(error.reason_code(), "GIT_FAILED");
 }
 
 #[test]

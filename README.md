@@ -24,13 +24,14 @@ just fast
 
 ## Readiness
 
-This repository currently proves component primitives: private dissociated clones, scoped writes
+This repository currently proves component primitives: private reflink-or-bounded-copy clones, scoped writes
 and deletes, exact Candidates, journals, preservation checks, daemon protocol behavior, and a
-Rust-owned reflink-or-byte-copy primitive. Its legacy authority token is not a signed production
+Rust-owned reflink-or-byte-copy materialization path. Its legacy authority token is not a signed production
 grant. `CandidateProvenance` and `CandidateManifest` require exact environment and toolchain
 digests plus ordered parent-Candidate lineage; the full manifest binds `CandidateId`, and
-`ProofRoot` binds that Candidate plus its Change/parent lineage. `PrivateClone::create` still uses
-Git's `--reference-if-able --dissociate` path, so the reflink primitive is not yet the clone path.
+`ProofRoot` binds that Candidate plus its Change/parent lineage. `PrivateClone::create` uses the
+Rust-owned materializer. The workspace manifest records whether it used `reflink` or `fallback`; both paths create a
+remote-free store with no alternates and are verified by checkout plus strict `git fsck` before publication.
 
 The schema-1 `PatchProposal` wire validator and workspace execution policy share one fixed contract:
 at most 128 unique changed paths, 1 MiB per replacement body, and 32 MiB of replacement content in

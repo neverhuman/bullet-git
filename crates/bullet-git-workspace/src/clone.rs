@@ -4,10 +4,11 @@ use crate::fsync::write_new_durable_file;
 use crate::generation::{GenerationBootstrap, GenerationStore, StagedGeneration};
 use crate::mirror::sync_mirror;
 use crate::preservation::{CleanupPermit, PreservationError};
+use crate::reflink::{copy_tree_prefers_reflink, CopyMode};
 use crate::safe_git::{FileProtocol, HeadState, SafeGit};
 use crate::{io_err, CapabilityError};
 use bullet_git_journal::{Checkpoint, DurableJournal};
-use bullet_git_types::GitOid;
+use bullet_git_types::{GitOid, GitOidAlgorithm};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -53,6 +54,8 @@ pub struct WorkspaceManifest {
     pub source_repo: String,
     /// Bare mirror the workspace was cloned from.
     pub mirror_dir: String,
+    /// How the private object store was independently materialized.
+    pub object_materialization: CopyMode,
     /// Private clone path.
     pub repo_dir: String,
 }
@@ -70,9 +73,9 @@ impl PrivateClone {
     /// Create a private clone per spec §20.2.
     ///
     /// Sync the per-repository mirror under the exclusive lock → verify base
-    /// exists in the mirror → clone from the mirror without checkout, with
-    /// objects shared then dissociated → remove the origin remote (no remote
-    /// survives: that is the no-credential/no-push guarantee) → detached
+    /// exists in the mirror → initialize a remote-free repository with the
+    /// exact object format → reflink or bounded-copy the mirror object store
+    /// without alternates → detached
     /// checkout of the exact base → create the private branch → record the
     /// manifest in the runtime dir, never inside the repo tree.
     ///
@@ -105,17 +108,18 @@ impl PrivateClone {
         let source = req.source_repo.to_string_lossy().into_owned();
         let mirror_str = mirror.dir.to_string_lossy().into_owned();
         let dest = repo_dir.to_string_lossy().into_owned();
-        clone_from_mirror(&git, &mirror_str, &dest)?;
+        let object_materialization =
+            clone_from_mirror(&git, &mirror.dir, &repo_dir, base.algorithm())?;
         mirror.release();
-        git.run(
-            Some(&repo_dir),
-            FileProtocol::Never,
-            &["remote", "remove", "origin"],
-            &[],
-        )?;
         guard_repository(&git, &repo_dir)?;
         let branch = format!("bullet/{}/{}", req.variant_id, req.attempt_id);
         checkout_private_branch(&git, &repo_dir, &base, &branch)?;
+        git.run(
+            Some(&repo_dir),
+            FileProtocol::Never,
+            &["fsck", "--full", "--strict", "--no-dangling"],
+            &[],
+        )?;
         let journal = DurableJournal::open(bootstrap.journal_dir())?;
         let base_tree = git
             .run(
@@ -139,6 +143,7 @@ impl PrivateClone {
             nonce_hex,
             source_repo: source,
             mirror_dir: mirror_str,
+            object_materialization,
             repo_dir: dest,
         };
         let manifest_json = serde_json::to_vec_pretty(&manifest)
@@ -352,24 +357,87 @@ fn require_ordinary_runtime_directory(
     }
 }
 
-/// Clone from the mirror with objects shared then dissociated, so a later
-/// mirror GC can never corrupt the workspace and no alternates file survives.
-fn clone_from_mirror(git: &SafeGit, mirror: &str, dest: &str) -> Result<(), CapabilityError> {
+/// Build a remote-free repository and independently materialize its objects.
+fn clone_from_mirror(
+    git: &SafeGit,
+    mirror: &Path,
+    dest: &Path,
+    algorithm: GitOidAlgorithm,
+) -> Result<CopyMode, CapabilityError> {
+    let destination = dest.to_string_lossy().into_owned();
+    let object_format = format!("--object-format={}", algorithm.as_str());
     git.run(
         None,
-        FileProtocol::User,
-        &[
-            "clone",
-            "--no-checkout",
-            "--reference-if-able",
-            mirror,
-            "--dissociate",
-            mirror,
-            dest,
-        ],
+        FileProtocol::Never,
+        &["init", "--quiet", &object_format, &destination],
         &[],
     )?;
+    let git_dir = dest.join(".git");
+    let objects = git_dir.join("objects");
+    require_empty_initial_object_directory(&objects)?;
+    let staged_objects = git_dir.join("bullet-objects-stage");
+    let mode = copy_tree_prefers_reflink(&mirror.join("objects"), &staged_objects)?;
+    if fs::symlink_metadata(staged_objects.join("info").join("alternates")).is_ok() {
+        fs::remove_dir_all(&staged_objects)
+            .map_err(|error| io_err("remove alternate-backed object stage", &error))?;
+        return Err(CapabilityError::Git(
+            "mirror object store depends on forbidden alternates".into(),
+        ));
+    }
+    remove_empty_initial_object_directory(&objects)?;
+    fs::rename(&staged_objects, &objects)
+        .map_err(|error| io_err("install private object store", &error))?;
+    File::open(&git_dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| io_err("sync private git directory", &error))?;
+    Ok(mode)
+}
+
+fn require_empty_initial_object_directory(objects: &Path) -> Result<(), CapabilityError> {
+    let metadata = fs::symlink_metadata(objects)
+        .map_err(|error| io_err("inspect initial object directory", &error))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(CapabilityError::Io(
+            "initial Git object path is not an ordinary directory".into(),
+        ));
+    }
+    for entry in fs::read_dir(objects).map_err(|error| io_err("read initial objects", &error))? {
+        let entry = entry.map_err(|error| io_err("read initial object entry", &error))?;
+        let name = entry.file_name();
+        if name != "info" && name != "pack" {
+            return Err(CapabilityError::Io(format!(
+                "unexpected initial Git object entry: {}",
+                entry.path().display()
+            )));
+        }
+        let metadata = entry
+            .file_type()
+            .map_err(|error| io_err("inspect initial object entry", &error))?;
+        if !metadata.is_dir()
+            || fs::read_dir(entry.path())
+                .map_err(|error| io_err("read initial object subdirectory", &error))?
+                .next()
+                .is_some()
+        {
+            return Err(CapabilityError::Io(format!(
+                "initial Git object entry is not an empty directory: {}",
+                entry.path().display()
+            )));
+        }
+    }
     Ok(())
+}
+
+fn remove_empty_initial_object_directory(objects: &Path) -> Result<(), CapabilityError> {
+    for name in ["info", "pack"] {
+        let path = objects.join(name);
+        match fs::remove_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_err("remove initial object subdirectory", &error)),
+        }
+    }
+    fs::remove_dir(objects).map_err(|error| io_err("remove initial object directory", &error))
 }
 
 /// Detached checkout of the exact base, then creation of the private branch.

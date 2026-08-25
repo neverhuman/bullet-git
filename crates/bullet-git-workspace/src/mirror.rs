@@ -5,9 +5,9 @@
 //! mirrored into `<root>/mirrors/<digest>.git` where the digest is BLAKE3 of
 //! the canonical source path; the mirror is created or fetched under an
 //! exclusive lock, the base SHA is verified against the mirror, and the
-//! private clone is taken from the mirror with
-//! `--reference-if-able <mirror> --dissociate`, so no alternates file
-//! survives and a later mirror GC can never corrupt a workspace.
+//! private clone independently materializes the mirror object store through
+//! the Rust reflink-or-bounded-copy path, so no alternates file survives and
+//! a later mirror GC can never corrupt a workspace.
 
 use crate::safe_git::{FileProtocol, SafeGit};
 use crate::{io_err, CapabilityError};

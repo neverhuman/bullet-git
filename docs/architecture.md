@@ -126,10 +126,11 @@ tree.
   a readable pid is broken once older than 60s; waiting is bounded (120s),
   then typed `MIRROR_LOCK_TIMEOUT`. The base SHA is verified against the
   mirror, and the private clone runs
-  `git clone --reference-if-able <mirror> --dissociate` from the mirror
-  while the lock is still held — objects are shared during the clone and
-  copied before it completes, so no alternates file survives and a mirror
-  GC can never corrupt a workspace.
+  a remote-free `git init` with the mirror's exact object format, then uses
+  the Rust-owned reflink-or-bounded-copy path while the lock is still held.
+  The copied store is installed atomically inside the unpublished generation;
+  checkout plus strict `git fsck` must pass, so no alternates file survives
+  and a later mirror GC cannot corrupt a workspace.
 - **GC-under-load proof (WI-30).** `tests/gc_safety.rs` pins that boundary
   with a hostile `git gc --prune=now --aggressive` plus `prune --expire=now`
   on the mirror after clone creation (the mirror's packs are proven
@@ -143,10 +144,11 @@ tree.
   requiring the exact byte count. It rejects symlinks and special entries,
   removes a partial destination on failure, and never resolves an ambient
   `cp`; `tests/reflink.rs` proves the fallback bytes and hostile-`PATH` case.
-  `PrivateClone::create` does not call this primitive yet: current workspace
-  object materialization remains Git's `--dissociate` copy. Integrating the
-  CoW path under the mirror lock and certifying it on a CoW-capable proof host
-  therefore remain open; the primitive alone is not a clone capability.
+  `PrivateClone::create` now calls this primitive under the mirror lock and
+  records `reflink` or `fallback` in the strict workspace manifest. Native
+  certification that the reflink branch executes on each supported CoW
+  filesystem remains release evidence; the credential-free fallback proof
+  does not claim host-level CoW support.
 - **Hostile-git controls (spec §20.3).** The child environment is cleared
   (strips every inherited `GIT_*` variable) and rebuilt with per-workspace
   `HOME`/`XDG_CONFIG_HOME`/`XDG_CACHE_HOME`, `GIT_CONFIG_NOSYSTEM=1`,

@@ -1,8 +1,8 @@
 //! GC-under-load fault tests (spec §20.2, WI-30): a hostile mirror
 //! `git gc --prune=now` — after clone creation, concurrent with clone
 //! creation, or concurrent with workspace commits — and even deletion of the
-//! mirror never corrupt a private clone, because `--reference-if-able …
-//! --dissociate` copies every object into the clone before creation returns.
+//! mirror never corrupt a private clone, because the Rust reflink-or-bounded-
+//! copy path independently materializes every object before creation returns.
 
 mod support;
 
