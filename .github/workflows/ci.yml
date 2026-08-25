@@ -32,12 +32,18 @@ jobs:
           EXPECTED_COMMIT: ${{ github.sha }}
         run: |
           bash ops/ci/artifact-check.sh source-scan "$EXPECTED_COMMIT"
-      - name: Upload source-scan observation
+      - name: Stage exact source-scan diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh source-scan "$EXPECTED_COMMIT"
+      - name: Upload source-scan observation
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-source-scan-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .ci-artifacts/
+          path: target/ci-upload/source-scan/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -66,12 +72,18 @@ jobs:
           EXPECTED_COMMIT: ${{ github.sha }}
         run: |
           bash ops/ci/artifact-check.sh fast "$EXPECTED_COMMIT"
-      - name: Upload fast diagnostics
+      - name: Stage exact fast diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh fast "$EXPECTED_COMMIT"
+      - name: Upload fast diagnostics
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-fast-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .ci-artifacts/
+          path: target/ci-upload/fast/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -106,12 +118,18 @@ jobs:
           EXPECTED_COMMIT: ${{ github.sha }}
         run: |
           bash ops/ci/artifact-check.sh lint "$EXPECTED_COMMIT"
-      - name: Upload lint observation
+      - name: Stage exact lint diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh lint "$EXPECTED_COMMIT"
+      - name: Upload lint observation
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-lint-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .ci-artifacts/
+          path: target/ci-upload/lint/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -140,12 +158,18 @@ jobs:
           EXPECTED_COMMIT: ${{ github.sha }}
         run: |
           bash ops/ci/artifact-check.sh contract "$EXPECTED_COMMIT"
-      - name: Upload contract diagnostics
+      - name: Stage exact contract diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh contract "$EXPECTED_COMMIT"
+      - name: Upload contract diagnostics
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-contract-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .ci-artifacts/
+          path: target/ci-upload/contract/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -176,12 +200,18 @@ jobs:
           EXPECTED_COMMIT: ${{ github.sha }}
         run: |
           bash ops/ci/artifact-check.sh security "$EXPECTED_COMMIT"
-      - name: Upload security observation
+      - name: Stage exact security diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh security "$EXPECTED_COMMIT"
+      - name: Upload security observation
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-security-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .ci-artifacts/
+          path: target/ci-upload/security/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -206,12 +236,18 @@ jobs:
           EXPECTED_COMMIT: ${{ github.sha }}
         run: |
           bash ops/ci/artifact-check.sh docs "$EXPECTED_COMMIT"
-      - name: Upload docs observation
+      - name: Stage exact docs diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh docs "$EXPECTED_COMMIT"
+      - name: Upload docs observation
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-docs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .ci-artifacts/
+          path: target/ci-upload/docs/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14

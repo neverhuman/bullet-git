@@ -30,15 +30,23 @@ jobs:
       - name: Validate sanitized observation
         id: artifacts
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
         run: |
-          bash ops/ci/artifact-check.sh source-scan
+          bash ops/ci/artifact-check.sh source-scan "$EXPECTED_COMMIT"
           echo "observation=present" >> "$GITHUB_OUTPUT"
-      - name: Upload source-scan observation
+      - name: Stage exact source-scan diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh source-scan "$EXPECTED_COMMIT"
+      - name: Upload source-scan observation
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-scheduled-source-scan
-          path: .ci-artifacts/observations/source-scan.json
+          path: target/ci-upload/source-scan/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -59,13 +67,21 @@ jobs:
         run: bash scripts/ci-local.sh history
       - name: Validate sanitized observation
         if: ${{ !cancelled() }}
-        run: bash ops/ci/artifact-check.sh history
-      - name: Upload history observation
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/artifact-check.sh history "$EXPECTED_COMMIT"
+      - name: Stage exact history diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh history "$EXPECTED_COMMIT"
+      - name: Upload history observation
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-history
-          path: .ci-artifacts/observations/history.json
+          path: target/ci-upload/history/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -83,13 +99,21 @@ jobs:
         run: bash scripts/ci-local.sh links
       - name: Validate sanitized observation
         if: ${{ !cancelled() }}
-        run: bash ops/ci/artifact-check.sh links
-      - name: Upload link observation
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/artifact-check.sh links "$EXPECTED_COMMIT"
+      - name: Stage exact links diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh links "$EXPECTED_COMMIT"
+      - name: Upload link observation
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-links
-          path: .ci-artifacts/observations/links.json
+          path: target/ci-upload/links/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -114,13 +138,21 @@ jobs:
         run: bash scripts/ci-local.sh advisory
       - name: Validate sanitized observation
         if: ${{ !cancelled() }}
-        run: bash ops/ci/artifact-check.sh advisory
-      - name: Upload advisory observation
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/artifact-check.sh advisory "$EXPECTED_COMMIT"
+      - name: Stage exact advisory diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh advisory "$EXPECTED_COMMIT"
+      - name: Upload advisory observation
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-advisory
-          path: .ci-artifacts/observations/advisory.json
+          path: target/ci-upload/advisory/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -148,15 +180,21 @@ jobs:
         run: bash scripts/ci-local.sh coverage
       - name: Validate sanitized coverage artifact
         if: ${{ !cancelled() }}
-        run: bash ops/ci/artifact-check.sh coverage
-      - name: Upload coverage diagnostic
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/artifact-check.sh coverage "$EXPECTED_COMMIT"
+      - name: Stage exact coverage diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh coverage "$EXPECTED_COMMIT"
+      - name: Upload coverage diagnostic
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-coverage
-          path: |
-            .ci-artifacts/observations/coverage.json
-            .ci-artifacts/reports/coverage.lcov
+          path: target/ci-upload/coverage/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -179,13 +217,22 @@ jobs:
       - name: Validate sanitized observation
         if: ${{ !cancelled() }}
         shell: bash
-        run: bash ops/ci/artifact-check.sh platform
-      - name: Upload macOS observation
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/artifact-check.sh platform "$EXPECTED_COMMIT"
+      - name: Stage exact platform diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh platform "$EXPECTED_COMMIT"
+      - name: Upload macOS observation
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-macos-refusal
-          path: .ci-artifacts/observations/platform.json
+          path: target/ci-upload/platform/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -208,13 +255,22 @@ jobs:
       - name: Validate sanitized observation
         if: ${{ !cancelled() }}
         shell: bash
-        run: bash ops/ci/artifact-check.sh platform
-      - name: Upload Windows observation
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/artifact-check.sh platform "$EXPECTED_COMMIT"
+      - name: Stage exact platform diagnostics
+        id: stage
         if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: bash ops/ci/stage-artifacts.sh platform "$EXPECTED_COMMIT"
+      - name: Upload Windows observation
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bullet-git-windows-refusal
-          path: .ci-artifacts/observations/platform.json
+          path: target/ci-upload/platform/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14

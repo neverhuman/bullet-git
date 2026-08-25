@@ -11,6 +11,17 @@ expected_tree="$(git rev-parse 'HEAD^{tree}')"
 lanes=(source-scan fast lint contract security docs)
 green=(success success success success success success)
 
+lane_script() {
+  case "$1" in
+    source-scan) printf '%s\n' ops/ci/source-scan.sh ;;
+    fast) printf '%s\n' ops/ci/fast.sh ;;
+    lint) printf '%s\n' ops/ci/lint.sh ;;
+    contract) printf '%s\n' ops/ci/contract.sh ;;
+    security) printf '%s\n' ops/ci/security.sh ;;
+    docs) printf '%s\n' ops/ci/docs.sh ;;
+  esac
+}
+
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
@@ -20,7 +31,7 @@ hash_file() {
 }
 
 make_fixtures() {
-  local lane relative path digest artifacts
+  local lane relative path digest artifacts doctor_command lane_command
   rm -rf -- "$test_root"
   mkdir -p "$test_root/observations" "$test_root/reports"
   printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -40,10 +51,13 @@ make_fixtures() {
           '[{path:$path,sha256:$sha256}]')"
         ;;
     esac
-    jq -n --arg lane "$lane" --arg commit "$expected_commit" --arg tree "$expected_tree" --argjson artifacts "$artifacts" '
+    doctor_command="bash scripts/ci-doctor.sh $lane"
+    lane_command="bash $(lane_script "$lane")"
+    jq -n --arg lane "$lane" --arg commit "$expected_commit" --arg tree "$expected_tree" \
+      --arg doctor "$doctor_command" --arg command "$lane_command" --argjson artifacts "$artifacts" '
       {schema_version:"bullet.ci-observation.v1",repository:"bullet-git",commit_oid:$commit,
        tree_oid:$tree,clean:true,
-       commands:["doctor","lane"],tool_versions:{},
+       commands:[$doctor,$command],tool_versions:{},
        outcomes:[{lane:$lane,status:"PASS",exit_code:0}],artifact_hashes:$artifacts,
        signed:false,evidence_class:"DIAGNOSTIC_ONLY"}' >"$test_root/observations/$lane.json"
   done
@@ -80,6 +94,8 @@ expect_failure CI_OBSERVATION_INVALID "$test_root" "$expected_commit" "${green[@
 make_fixtures; jq '.commit_oid="2222222222222222222222222222222222222222"' "$test_root/observations/security.json" >"$test_root/x"; mv "$test_root/x" "$test_root/observations/security.json"
 expect_failure CI_OBSERVATION_INVALID "$test_root" "$expected_commit" "${green[@]}"
 make_fixtures; jq '.clean=false' "$test_root/observations/source-scan.json" >"$test_root/x"; mv "$test_root/x" "$test_root/observations/source-scan.json"
+expect_failure CI_OBSERVATION_INVALID "$test_root" "$expected_commit" "${green[@]}"
+make_fixtures; jq '.commands=["true","true"]' "$test_root/observations/lint.json" >"$test_root/x"; mv "$test_root/x" "$test_root/observations/lint.json"
 expect_failure CI_OBSERVATION_INVALID "$test_root" "$expected_commit" "${green[@]}"
 make_fixtures; jq '.outcomes[0]={lane:"contract",status:"FAIL",exit_code:1}' "$test_root/observations/contract.json" >"$test_root/x"; mv "$test_root/x" "$test_root/observations/contract.json"
 expect_failure CI_OBSERVATION_INVALID "$test_root" "$expected_commit" "${green[@]}"
