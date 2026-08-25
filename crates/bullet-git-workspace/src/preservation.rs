@@ -50,6 +50,9 @@ pub enum PreservationError {
     /// Filesystem persistence failed.
     #[error("preservation io failure: {0}")]
     Io(String),
+    /// Cleanup crossed its first destructive boundary, so completion is unknown.
+    #[error("preservation cleanup outcome is unknown: {0}")]
+    OutcomeUnknown(String),
 }
 
 impl PreservationError {
@@ -62,6 +65,7 @@ impl PreservationError {
             Self::ReceiptRefused(_) => "PRESERVATION_RECEIPT_REFUSED",
             Self::Unsupported(_) => "PRESERVATION_UNSUPPORTED",
             Self::Io(_) => "PRESERVATION_IO_FAILED",
+            Self::OutcomeUnknown(_) => "PRESERVATION_OUTCOME_UNKNOWN",
         }
     }
 }
@@ -200,6 +204,10 @@ impl CleanupPermit {
 
     pub(crate) fn destination(&self) -> &Path {
         &self.destination
+    }
+
+    pub(crate) fn artifact_digest(&self) -> Digest {
+        self.artifact_digest
     }
 }
 

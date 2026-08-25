@@ -1,8 +1,9 @@
 //! Private clone creation (spec §20.2) and receipt-gated cleanup (spec §20.8).
 
+use crate::fsync::write_new_durable_file;
 use crate::generation::{GenerationBootstrap, GenerationStore, StagedGeneration};
 use crate::mirror::sync_mirror;
-use crate::preservation::CleanupPermit;
+use crate::preservation::{CleanupPermit, PreservationError};
 use crate::safe_git::{FileProtocol, HeadState, SafeGit};
 use crate::{io_err, CapabilityError};
 use bullet_git_journal::{Checkpoint, DurableJournal};
@@ -246,7 +247,8 @@ impl PrivateClone {
     /// # Errors
     ///
     /// Returns `PRESERVATION_RECEIPT_REFUSED` when the permit does not bind
-    /// this workspace, or `IO_FAILED` when deletion fails.
+    /// this workspace. Once deletion starts, any failure is
+    /// `PRESERVATION_OUTCOME_UNKNOWN` because removal may be partial.
     pub(crate) fn cleanup(
         &mut self,
         permit: CleanupPermit,
@@ -274,22 +276,33 @@ impl PrivateClone {
             )
             .into());
         }
-        fs::remove_dir_all(&work_dir).map_err(|err| io_err("delete workspace", &err))?;
+        fs::remove_dir_all(&work_dir).map_err(|error| {
+            PreservationError::OutcomeUnknown(format!("delete workspace: {error}"))
+        })?;
         if let Some(parent) = work_dir.parent() {
             File::open(parent)
                 .and_then(|directory| directory.sync_all())
-                .map_err(|error| io_err("sync cleanup parent", &error))?;
+                .map_err(|error| {
+                    PreservationError::OutcomeUnknown(format!("sync cleanup parent: {error}"))
+                })?;
         }
         let tombstone = serde_json::json!({
+            "schema_version": 1,
             "attempt_id": self.manifest.attempt_id,
             "variant_id": self.manifest.variant_id,
             "deleted_at": deleted_at,
             "nonce_hex": self.manifest.nonce_hex,
             "preservation_receipt_digest": permit.receipt_digest().to_hex(),
+            "preservation_artifact_digest": permit.artifact_digest().to_hex(),
             "preservation_destination": permit.destination().display().to_string(),
         });
         let path = self.runtime_dir.join("tombstone.json");
-        fs::write(&path, tombstone.to_string()).map_err(|err| io_err("write tombstone", &err))?;
+        let bytes = serde_json::to_vec(&tombstone).map_err(|error| {
+            PreservationError::OutcomeUnknown(format!("encode cleanup tombstone: {error}"))
+        })?;
+        write_new_durable_file(&path, &bytes).map_err(|error| {
+            PreservationError::OutcomeUnknown(format!("persist cleanup tombstone: {error}"))
+        })?;
         Ok(path)
     }
 }

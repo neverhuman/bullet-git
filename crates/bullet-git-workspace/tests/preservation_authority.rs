@@ -160,9 +160,67 @@ fn sealed_receipt_preserves_salvage_state_before_exact_cleanup() {
         destination.is_dir(),
         "external preservation survives cleanup"
     );
-    let tombstone_json = fs::read_to_string(tombstone).expect("tombstone");
-    assert!(tombstone_json.contains(&receipt_digest.to_hex()));
-    assert!(tombstone_json.contains(destination.to_string_lossy().as_ref()));
+    let tombstone_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(tombstone).expect("durable tombstone"))
+            .expect("tombstone json");
+    assert_eq!(tombstone_json["schema_version"], 1);
+    assert_eq!(
+        tombstone_json["preservation_receipt_digest"],
+        receipt_digest.to_hex()
+    );
+    assert_eq!(
+        tombstone_json["preservation_artifact_digest"],
+        receipt.artifact_digest().to_hex()
+    );
+    assert_eq!(
+        tombstone_json["preservation_destination"],
+        destination.to_string_lossy().as_ref()
+    );
+}
+
+#[test]
+fn post_delete_tombstone_failure_is_unknown_and_preservation_survives() {
+    let mut fixture = Fixture::new();
+    let receipt = fixture.issue();
+    let destination = receipt.destination().to_path_buf();
+    fs::create_dir(fixture.runtime_dir.join("tombstone.json"))
+        .expect("hostile pre-existing tombstone entry");
+
+    let error = fixture
+        .authority
+        .cleanup(&mut fixture.repo, &good_auth(), receipt.token(), CREATED_AT)
+        .expect_err("post-delete persistence failure is indeterminate");
+
+    assert_eq!(error.reason_code(), "PRESERVATION_OUTCOME_UNKNOWN");
+    assert!(
+        !fixture.work_dir.exists(),
+        "the failure happened after destructive cleanup"
+    );
+    assert!(destination.is_dir(), "salvage remains external and durable");
+    assert!(destination.join("repository.bundle").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn post_delete_tombstone_symlink_is_not_followed_or_truncated() {
+    use std::os::unix::fs::symlink;
+
+    let mut fixture = Fixture::new();
+    let receipt = fixture.issue();
+    let target = fixture._tmp.path().join("external-tombstone-target");
+    fs::write(&target, b"sentinel").expect("external sentinel");
+    symlink(&target, fixture.runtime_dir.join("tombstone.json"))
+        .expect("hostile tombstone symlink");
+
+    let error = fixture
+        .authority
+        .cleanup(&mut fixture.repo, &good_auth(), receipt.token(), CREATED_AT)
+        .expect_err("post-delete symlink is indeterminate");
+
+    assert_eq!(error.reason_code(), "PRESERVATION_OUTCOME_UNKNOWN");
+    assert!(!fixture.work_dir.exists());
+    assert_eq!(fs::read(target).expect("sentinel survives"), b"sentinel");
+    assert!(receipt.destination().join("repository.bundle").is_file());
 }
 
 #[test]

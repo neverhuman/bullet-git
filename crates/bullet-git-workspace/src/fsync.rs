@@ -1,6 +1,7 @@
 //! Small filesystem durability helpers shared only inside the workspace crate.
 
 use std::fs::{File, Metadata, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::cas::CasError;
@@ -114,6 +115,19 @@ pub(crate) fn create_new_file(path: &Path) -> Result<File, std::io::Error> {
         options.mode(0o600);
     }
     options.open(path)
+}
+
+pub(crate) fn write_new_durable_file(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+    let mut file = create_new_file(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "durable file has no parent directory",
+        )
+    })?;
+    sync_directory(parent)
 }
 
 pub(crate) fn make_read_only(file: &File) -> Result<(), std::io::Error> {
