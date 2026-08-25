@@ -1,4 +1,6 @@
 //! No-follow copying and durability for complete workspace generations.
+// jankurai:allow repo-rot.path.fake-versioned-source reason=module names the operation (no-follow copy of a tree), not a parked copy of another module owner=git expires=2027-08-31
+// It is the only implementation of generation materialisation and is proved by crates/bullet-git-workspace/tests/real_repository.rs.
 
 use crate::fsync::create_new_file;
 use crate::generation::GenerationError;

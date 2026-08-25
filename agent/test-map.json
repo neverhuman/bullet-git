@@ -1,6 +1,62 @@
 {
   "workspace": "bullet-git",
   "tests": {
+    ".bullet-family/": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "gitignored local output of the family toolchain lane; no committed source lives here, so the canonical required lane is the proof for the tree it reports on"
+    },
+    ".config/": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "nextest profiles used by every lane"
+    },
+    ".github/": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "prove hosted lanes match local scripts"
+    },
+    ".gitignore": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "ignored-file policy; the fast lane proves the tree still builds"
+    },
+    ".jankurai/": {
+      "command": "bash ops/ci/audit.sh",
+      "purpose": "gitignored audit lane output; the audit lane regenerates it from the pinned local auditor"
+    },
+    "AGENTS.md": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "agent entrypoint; the fast lane proves the commands it names"
+    },
+    "CHANGELOG.md": {
+      "command": "bash ops/ci/audit.sh",
+      "purpose": "release language must stay evidence-backed and honestly blocked; the audit lane checks it"
+    },
+    "Cargo.lock": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "locked dependency graph"
+    },
+    "Cargo.toml": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "workspace manifest"
+    },
+    "Justfile": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "command surface; every recipe delegates to scripts/ci-local.sh"
+    },
+    "LICENSE": {
+      "command": "test -s LICENSE",
+      "purpose": "license text; no executable proof"
+    },
+    "README.md": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "documentation; the fast lane proves the commands it names"
+    },
+    "SPLIT.md": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "split-family contract; the required lane is the check it names"
+    },
+    "agent/": {
+      "command": "bash ops/ci/audit.sh",
+      "purpose": "Jankurai metadata; the audit lane validates it"
+    },
     "crates/": {
       "command": "cargo test --workspace",
       "purpose": "prove Change/Candidate, capability API, journal, and proof roots"
@@ -13,69 +69,37 @@
       "command": "cargo test -p bullet-gitd",
       "purpose": "prove unavailable authority prevents production mutation, private permits bind exact calls, durable replay fails closed, and stdio frames remain bounded"
     },
+    "deny.toml": {
+      "command": "bash scripts/ci-local.sh security",
+      "purpose": "cargo-deny ban policy; the security lane is the check that reads it"
+    },
+    "docs/": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "architecture, testing, and release contracts; the required lane is the check they name"
+    },
+    "docs/architecture.md": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "daemon trust-boundary contract checked with the required implementation proof"
+    },
     "ops/": {
       "command": "just check",
       "purpose": "verify local CI parity"
-    },
-    ".github/": {
-      "command": "bash scripts/ci-local.sh required",
-      "purpose": "prove hosted lanes match local scripts"
-    },
-    "README.md": {
-      "command": "bash scripts/ci-local.sh fast",
-      "purpose": "documentation; the fast lane proves the commands it names"
-    },
-    "AGENTS.md": {
-      "command": "bash scripts/ci-local.sh fast",
-      "purpose": "agent entrypoint; the fast lane proves the commands it names"
-    },
-    "SPLIT.md": {
-      "command": "bash scripts/ci-local.sh required",
-      "purpose": "split-family contract; the required lane is the check it names"
-    },
-    "Justfile": {
-      "command": "bash scripts/ci-local.sh fast",
-      "purpose": "command surface; every recipe delegates to scripts/ci-local.sh"
-    },
-    ".gitignore": {
-      "command": "bash scripts/ci-local.sh fast",
-      "purpose": "ignored-file policy; the fast lane proves the tree still builds"
-    },
-    "LICENSE": {
-      "command": "test -s LICENSE",
-      "purpose": "license text; no executable proof"
-    },
-    "agent/": {
-      "command": "bash ops/ci/audit.sh",
-      "purpose": "Jankurai metadata; the audit lane validates it"
-    },
-    ".config/": {
-      "command": "bash scripts/ci-local.sh fast",
-      "purpose": "nextest profiles used by every lane"
-    },
-    "Cargo.toml": {
-      "command": "bash scripts/ci-local.sh fast",
-      "purpose": "workspace manifest"
-    },
-    "Cargo.lock": {
-      "command": "bash scripts/ci-local.sh fast",
-      "purpose": "locked dependency graph"
     },
     "rust-toolchain.toml": {
       "command": "bash scripts/ci-local.sh required",
       "purpose": "pinned Rust toolchain; the required lane builds and lints with it"
     },
-    "scripts/ci-local.sh": {
-      "command": "bash scripts/ci-local.sh required",
-      "purpose": "canonical local lane dispatcher exercised by the required lane"
-    },
     "scripts/ci-doctor.sh": {
       "command": "bash scripts/ci-doctor.sh fast",
       "purpose": "fail-closed admission of the pinned local tools used by the deterministic fast lane"
     },
-    "docs/architecture.md": {
+    "scripts/ci-local.sh": {
       "command": "bash scripts/ci-local.sh required",
-      "purpose": "daemon trust-boundary contract checked with the required implementation proof"
+      "purpose": "canonical local lane dispatcher exercised by the required lane"
+    },
+    "tools/": {
+      "command": "bash scripts/ci-local.sh security",
+      "purpose": "canonical Jankurai lane adapters; they delegate to the exact ops/ci lane script they name"
     }
   }
 }

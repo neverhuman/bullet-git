@@ -1,0 +1,10 @@
+# Tools the security lane (`ops/ci/security.sh`, `tools/security-lane.sh`) runs.
+# Every required tool is fail-closed: `require_tool` exits non-zero when it is
+# absent, so a missing scanner can never produce a green lane.
+schema_version = "1.0.0"
+enabled_tools = ["gitleaks", "cargo-deny"]
+required_tools = ["gitleaks", "cargo-deny"]
+advisory_tools = []
+
+[severity_thresholds]
+fail_lane_on = "high"

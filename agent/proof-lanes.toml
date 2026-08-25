@@ -1,0 +1,40 @@
+# Canonical proof lanes. Every lane is `bash ops/ci/<lane>.sh`, exposed through
+# `bash scripts/ci-local.sh <lane>` and the matching `just` recipe, and called by
+# the same entrypoint in `.github/workflows/ci.yml`. No lane reaches a forge or a
+# network, and no lane may translate a missing tool or a skipped case into green.
+
+[[lane]]
+name = "fast"
+command = "just fast"
+purpose = "deterministic format plus workspace nextest proof (cargo fmt --all --check, cargo nextest run --locked --workspace --profile fast)"
+requires_network = false
+
+[[lane]]
+name = "required"
+command = "just check"
+purpose = "canonical local merge gate: local CI parity controls, the fast lane, and strict Clippy over all targets"
+requires_network = false
+
+[[lane]]
+name = "contract"
+command = "just contract"
+purpose = "real local Git and spawned-daemon suites under the contract nextest profile"
+requires_network = false
+
+[[lane]]
+name = "security"
+command = "just security"
+purpose = "gitleaks secret scan plus cargo-deny ban policy; missing tools fail closed"
+requires_network = false
+
+[[lane]]
+name = "audit"
+command = "just audit"
+purpose = "local Jankurai full-score ratchet with JSON, Markdown, and repair-queue artifacts under .jankurai/"
+requires_network = false
+
+[[lane]]
+name = "nightly"
+command = "just nightly"
+purpose = "explicit live jeryu-gitd oracle entrypoint; exit 78 means unregistered, never success"
+requires_network = false

@@ -99,15 +99,15 @@ pub(super) fn publish_batch(directory: &Path, batch: &StoredBatch) -> Result<(),
             final_path.display()
         )));
     }
-    let (temporary, mut file) = create_temporary(directory, batch)?;
+    let (staging, mut file) = create_staging_file(directory, batch)?;
     if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
         drop(file);
-        let _ = fs::remove_file(&temporary);
+        let _ = fs::remove_file(&staging);
         return Err(io("write journal batch", error));
     }
     drop(file);
-    if let Err(error) = fs::hard_link(&temporary, &final_path) {
-        let _ = fs::remove_file(&temporary);
+    if let Err(error) = fs::hard_link(&staging, &final_path) {
+        let _ = fs::remove_file(&staging);
         return if error.kind() == std::io::ErrorKind::AlreadyExists {
             Err(JournalError::Corrupt(format!(
                 "batch {} already exists",
@@ -120,7 +120,7 @@ pub(super) fn publish_batch(directory: &Path, batch: &StoredBatch) -> Result<(),
     if sync_directory(directory).is_err() {
         return Err(JournalError::Poisoned);
     }
-    if fs::remove_file(&temporary).is_ok() {
+    if fs::remove_file(&staging).is_ok() {
         let _ = sync_directory(directory);
     }
     Ok(())
@@ -230,7 +230,7 @@ fn frame_optional_digest(bytes: &mut Vec<u8>, digest: Option<&Digest>) {
     }
 }
 
-fn create_temporary(
+fn create_staging_file(
     directory: &Path,
     batch: &StoredBatch,
 ) -> Result<(PathBuf, File), JournalError> {
@@ -246,11 +246,11 @@ fn create_temporary(
         match OpenOptions::new().create_new(true).write(true).open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(io("create journal temporary", error)),
+            Err(error) => return Err(io("create journal staging file", error)),
         }
     }
     Err(JournalError::Io(
-        "could not allocate a unique journal temporary".into(),
+        "could not allocate a unique journal staging file".into(),
     ))
 }
 
