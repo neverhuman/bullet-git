@@ -11,9 +11,11 @@ use unicode_normalization::UnicodeNormalization;
 /// Frozen pure proposal schema version.
 pub const PATCH_PROPOSAL_SCHEMA_VERSION: u32 = 1;
 /// Maximum operations admitted in one proposal.
-const MAX_OPERATIONS: usize = 1_024;
+pub const MAX_PATCH_OPERATIONS: usize = 128;
 /// Maximum UTF-8 bytes admitted in one replacement body.
-const MAX_CONTENT_BYTES: usize = 1_048_576;
+pub const MAX_CONTENT_BYTES: usize = 1_048_576;
+/// Maximum UTF-8 bytes admitted across all replacement bodies.
+pub const MAX_AGGREGATE_CONTENT_BYTES: usize = 32 * 1_048_576;
 
 /// Canonical repository-relative path.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,7 +130,7 @@ impl PatchProposal {
         if self.schema_version != PATCH_PROPOSAL_SCHEMA_VERSION {
             return Err(ProposalError::UnsupportedSchema(self.schema_version));
         }
-        if self.operations.is_empty() || self.operations.len() > MAX_OPERATIONS {
+        if self.operations.is_empty() || self.operations.len() > MAX_PATCH_OPERATIONS {
             return Err(ProposalError::InvalidOperationCount(self.operations.len()));
         }
         if self.gate_ids.is_empty() {
@@ -141,10 +143,20 @@ impl PatchProposal {
         }
 
         let mut paths = BTreeMap::new();
+        let mut aggregate_content_bytes = 0_usize;
         for operation in &self.operations {
             if let PatchMutation::Write { content_utf8 } = &operation.mutation {
                 if content_utf8.len() > MAX_CONTENT_BYTES {
                     return Err(ProposalError::ContentTooLarge(operation.path.to_string()));
+                }
+                aggregate_content_bytes =
+                    aggregate_content_bytes
+                        .checked_add(content_utf8.len())
+                        .ok_or(ProposalError::AggregateContentTooLarge(usize::MAX))?;
+                if aggregate_content_bytes > MAX_AGGREGATE_CONTENT_BYTES {
+                    return Err(ProposalError::AggregateContentTooLarge(
+                        aggregate_content_bytes,
+                    ));
                 }
             }
             if matches!(operation.mutation, PatchMutation::Delete)
@@ -182,7 +194,7 @@ pub enum ProposalError {
     #[error("PatchProposal schema {0} is unsupported")]
     UnsupportedSchema(u32),
     /// Operations were empty or over the fixed bound.
-    #[error("operations must contain 1..={MAX_OPERATIONS} entries, got {0}")]
+    #[error("operations must contain 1..={MAX_PATCH_OPERATIONS} entries, got {0}")]
     InvalidOperationCount(usize),
     /// No admitted gates were provided.
     #[error("PatchProposal must reference at least one admitted gate")]
@@ -193,6 +205,9 @@ pub enum ProposalError {
     /// One write exceeded the fixed bound.
     #[error("patch contents too large at {0}")]
     ContentTooLarge(String),
+    /// The sum of all replacement bodies exceeded the fixed bound.
+    #[error("aggregate patch contents too large: {0} bytes exceeds {MAX_AGGREGATE_CONTENT_BYTES}")]
+    AggregateContentTooLarge(usize),
     /// A delete claimed an absent preimage.
     #[error("delete requires an existing preimage at {0}")]
     MissingPreimage(String),
@@ -217,6 +232,7 @@ impl ProposalError {
             Self::GateRequired => "GATE_REQUIRED",
             Self::DuplicateGate => "DUPLICATE_GATE",
             Self::ContentTooLarge(_) => "CONTENT_TOO_LARGE",
+            Self::AggregateContentTooLarge(_) => "AGGREGATE_CONTENT_TOO_LARGE",
             Self::MissingPreimage(_) => "MISSING_PREIMAGE",
             Self::PathCollision { .. } => "PATH_COLLISION",
             Self::PathConflict { .. } => "PATH_CONFLICT",
@@ -279,12 +295,14 @@ mod tests {
     }
 
     fn write(path: &str, preimage: Preimage) -> PatchOperation {
+        write_with_content(path, preimage, "next".into())
+    }
+
+    fn write_with_content(path: &str, preimage: Preimage, content_utf8: String) -> PatchOperation {
         PatchOperation {
             path: path.parse().expect("path"),
             preimage,
-            mutation: PatchMutation::Write {
-                content_utf8: "next".into(),
-            },
+            mutation: PatchMutation::Write { content_utf8 },
         }
     }
 
@@ -358,5 +376,51 @@ mod tests {
                 "accepted portable ancestor conflict {parent:?} and {child:?}"
             );
         }
+
+        let exact_path_bound = proposal(
+            (0..MAX_PATCH_OPERATIONS)
+                .map(|index| write(&format!("src/{index}.rs"), Preimage::Absent))
+                .collect(),
+        );
+        exact_path_bound.validate().expect("exact path bound");
+        let over_path_bound = proposal(
+            (0..=MAX_PATCH_OPERATIONS)
+                .map(|index| write(&format!("src/{index}.rs"), Preimage::Absent))
+                .collect(),
+        );
+        assert_eq!(
+            over_path_bound
+                .validate()
+                .expect_err("operation bound")
+                .reason_code(),
+            "INVALID_OPERATION_COUNT"
+        );
+
+        let full_files = MAX_AGGREGATE_CONTENT_BYTES / MAX_CONTENT_BYTES;
+        let aggregate_bound = (0..full_files)
+            .map(|index| {
+                write_with_content(
+                    &format!("src/aggregate-{index}.txt"),
+                    Preimage::Absent,
+                    "x".repeat(MAX_CONTENT_BYTES),
+                )
+            })
+            .collect::<Vec<_>>();
+        proposal(aggregate_bound.clone())
+            .validate()
+            .expect("exact aggregate bound");
+        let mut over_aggregate_bound = aggregate_bound;
+        over_aggregate_bound.push(write_with_content(
+            "src/one-byte-over.txt",
+            Preimage::Absent,
+            "x".into(),
+        ));
+        assert_eq!(
+            proposal(over_aggregate_bound)
+                .validate()
+                .expect_err("aggregate bound")
+                .reason_code(),
+            "AGGREGATE_CONTENT_TOO_LARGE"
+        );
     }
 }

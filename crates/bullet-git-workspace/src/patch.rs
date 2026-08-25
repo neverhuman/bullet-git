@@ -2,14 +2,8 @@
 
 use crate::scope::ScopeGrant;
 use crate::CapabilityError;
+pub use bullet_git_types::{MAX_AGGREGATE_CONTENT_BYTES, MAX_CONTENT_BYTES, MAX_PATCH_OPERATIONS};
 use std::collections::{HashMap, HashSet};
-
-/// Policy bound for unique changed paths in one proposal.
-pub const MAX_PATCH_OPERATIONS: usize = 128;
-/// Frozen wire-contract bound for one replacement body.
-pub const MAX_CONTENT_BYTES: usize = 1_048_576;
-/// Policy bound for the sum of replacement bodies in one proposal.
-pub const MAX_AGGREGATE_CONTENT_BYTES: usize = 32 * 1_048_576;
 
 /// One patch operation.
 #[derive(Clone, Debug, PartialEq, Eq)]

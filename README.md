@@ -32,12 +32,9 @@ digests plus ordered parent-Candidate lineage; the full manifest binds `Candidat
 `ProofRoot` binds that Candidate plus its Change/parent lineage. `PrivateClone::create` still uses
 Git's `--reference-if-able --dissociate` path, so the reflink primitive is not yet the clone path.
 
-Execution policy admits at most 128 unique changed paths, 1 MiB per replacement body, and 32 MiB
-of replacement content in aggregate. The separate schema-1 `PatchProposal` wire validator still
-admits up to 1,024 operations and enforces only the per-body byte bound before execution. That
-1,024-versus-128 split is an open contract-alignment gap: proposals above the execution limit can
-decode but are refused before a workspace mutation, and the larger wire bound is not an execution
-capability.
+The schema-1 `PatchProposal` wire validator and workspace execution policy share one fixed contract:
+at most 128 unique changed paths, 1 MiB per replacement body, and 32 MiB of replacement content in
+aggregate. Oversized proposals are refused by the typed wire validator before workspace mutation.
 
 There is no five-plane transaction receipt or production-readiness claim here. Protected refs,
 checks, integration, and observation remain forge/control-plane responsibilities and are not

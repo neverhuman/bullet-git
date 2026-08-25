@@ -20,6 +20,7 @@ pub use ids::{
 pub use lineage::{ChangeEvolution, LineageError, LineageGraph};
 pub use proposal::{
     PatchMutation, PatchOperation, PatchProposal, Preimage, ProposalError, RepoPath,
+    MAX_AGGREGATE_CONTENT_BYTES, MAX_CONTENT_BYTES, MAX_PATCH_OPERATIONS,
     PATCH_PROPOSAL_SCHEMA_VERSION,
 };
 

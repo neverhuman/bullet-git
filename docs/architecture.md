@@ -178,13 +178,10 @@ tree.
   accepts 1..=128 unique paths, at most 1 MiB per replacement body, and at
   most 32 MiB of replacement content across the batch. Exceeding the last
   bound returns `AGGREGATE_CONTENT_TOO_LARGE`.
-  The separate schema-1 `PatchProposal` wire validator still admits 1..=1,024
-  operations and the 1 MiB per-body bound, but has no aggregate-content bound.
-  `apply_proposal` runs execution admission after wire validation, so a
-  129..=1,024-operation proposal can decode and is then refused with
-  `INVALID_OPERATION_COUNT` before mutation. Aligning the immutable proposal
-  contract to the execution policy is an open contract gap; the 1,024 wire
-  maximum must not be represented as a workspace capability.
+  The strict schema-1 `PatchProposal` wire validator imports the same fixed
+  limits and refuses an oversized proposal before workspace admission. The
+  wire format therefore does not advertise a capability the writer cannot
+  execute.
 - **Deletes.** A patch entry may carry `"op": "delete"`. The target must
   be an existing regular file on disk when the batch is validated (else
   typed `PATH_ABSENT`), scope rules apply exactly as for writes, and the
@@ -260,7 +257,7 @@ cannot create that session until the immutable authority consumer lands.
 | `clone` | `source_repo`, algorithm-tagged `base_sha`, `root`, `created_at`, `allowed_prefixes`, `commit_date` (variant/attempt/nonce come from the token) | `repo_dir`, `runtime_dir`, `branch`, tagged `base_sha` |
 | `read_tree` | — | `files`: tracked paths |
 | `apply_change` | `patches`: `[{path, op?, contents_hex?}]` — `op` is `write` (default; full-file `contents_hex` required, hex) or `delete` (must omit `contents_hex`) | `applied`: count |
-| `apply_proposal` | `proposal`: strict schema-1 `PatchProposal` (wire maximum 1,024; execution maximum 128) | `applied`: count; oversized execution batches refuse before mutation |
+| `apply_proposal` | `proposal`: strict schema-1 `PatchProposal` (shared maximum 128 paths, 1 MiB/body, 32 MiB aggregate) | `applied`: count; oversized proposals refuse before mutation |
 | `checkpoint` | — | Checkpoint JSON incl. `git_tree` |
 | `prepare_candidate` | strict `change` plus complete `provenance` (`environment_digest`, `toolchain_digest`, ordered `parent_candidate_ids`, and every other field are mandatory) | provenance-bound Candidate JSON with exact tagged Git OIDs and patch digest |
 | `preserve` | `destination` (new absolute canonical external directory) | opaque `preservation_receipt`, receipt/artifact digests, canonical destination |
