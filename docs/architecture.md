@@ -130,6 +130,23 @@ tree.
   while the lock is still held — objects are shared during the clone and
   copied before it completes, so no alternates file survives and a mirror
   GC can never corrupt a workspace.
+- **GC-under-load proof (WI-30).** `tests/gc_safety.rs` pins that boundary
+  with a hostile `git gc --prune=now --aggressive` plus `prune --expire=now`
+  on the mirror after clone creation (the mirror's packs are proven
+  rewritten), deletion of the whole mirror, and a GC loop concurrent with
+  clone creation and with commits inside existing workspaces: every private
+  clone stays `fsck --full --strict` clean, every reachable object is
+  readable from its own store, and checkout plus commit still work. A CoW
+  reflink fast path is designed, not implemented. The object copy today is
+  git's own `--dissociate` repack, and git has no reflink mode; the fast
+  path would be `git init` + a no-follow copy of the mirror's `objects/`
+  through `std::fs::copy` (Linux `copy_file_range`, which is a reflink on
+  XFS/btrfs and a plain copy elsewhere — `cp --reflink=auto` semantics with
+  no new dependency and no `unsafe`) + a ref fetch from the mirror path
+  under the same lock, followed by the same guards. It is not implemented
+  because it replaces the §20.2 mechanism these tests pin and cannot be
+  proven on the ext4 proof host (no CoW filesystem); it stays a documented
+  design until a CoW-capable proof lane exists.
 - **Hostile-git controls (spec §20.3).** The child environment is cleared
   (strips every inherited `GIT_*` variable) and rebuilt with per-workspace
   `HOME`/`XDG_CONFIG_HOME`/`XDG_CACHE_HOME`, `GIT_CONFIG_NOSYSTEM=1`,
