@@ -4,6 +4,7 @@
 //! environment (spec §20.3). [`PrivateClone`] implements the §20.2 creation
 //! steps; [`RealRepository`] implements the capability API over a real clone.
 
+mod advisers;
 mod apply;
 mod cas;
 mod clone;
@@ -12,6 +13,7 @@ mod generation;
 #[cfg(test)]
 mod generation_tests;
 mod git_config;
+mod lineage;
 mod mirror;
 mod patch;
 mod preservation;
@@ -22,9 +24,11 @@ mod scope;
 mod status;
 mod tree_copy;
 
+pub use advisers::{forecast_conflicts, intent_aware_revert, patch_algebra_disjoint, Advice};
 pub use cas::{cas_digest, CasError, CasPut, ImmutableCas, PutDisposition, MAX_CAS_OBJECT_BYTES};
 pub use clone::{CloneRequest, PrivateClone, WorkspaceManifest};
 pub use generation::GenerationError;
+pub use lineage::WorkspaceLineage;
 pub use mirror::{mirror_dir, MirrorLock, LOCK_MAX_WAIT, LOCK_STALE_AFTER};
 pub use patch::{validate_batch, PatchHunk, PatchOp, MAX_CONTENT_BYTES, MAX_PATCH_OPERATIONS};
 pub use preservation::{PreservationAuthority, PreservationError, PreservationReceipt};
@@ -32,7 +36,9 @@ pub use repository::{AgentRepository, CommitIdentity, ExpectedAuthority, RealRep
 pub use safe_git::{FileProtocol, GitOutput, HeadState, SafeGit};
 pub use scope::{normalize_rel_path, ScopeGrant};
 
-use bullet_git_types::{AuthorityError, CandidateManifestError, ProposalError, TypesError};
+use bullet_git_types::{
+    AuthorityError, CandidateManifestError, LineageError, ProposalError, TypesError,
+};
 use thiserror::Error;
 
 /// Capability error with stable reason codes.
@@ -162,6 +168,9 @@ pub enum CapabilityError {
     /// Canonical Candidate manifest validation failed.
     #[error(transparent)]
     CandidateManifest(#[from] CandidateManifestError),
+    /// Change lineage query or record failed.
+    #[error(transparent)]
+    Lineage(#[from] LineageError),
 }
 
 impl CapabilityError {
@@ -199,6 +208,7 @@ impl CapabilityError {
             Self::Types(_) => "INVALID_TYPES",
             Self::Proposal(error) => error.reason_code(),
             Self::CandidateManifest(error) => error.reason_code(),
+            Self::Lineage(error) => error.reason_code(),
         }
     }
 }

@@ -9,12 +9,12 @@ pub mod protocol;
 use bullet_git_journal::{Checkpoint, Journal};
 use bullet_git_types::{
     frame, framed_digest, AuthorityEnvelope, Candidate, CandidateManifest, CandidateProvenance,
-    Change, Digest, EvolutionEdge, EvolutionKind, GitOid, GitOidAlgorithm, PatchMutation,
-    PatchProposal, Preimage, ProofRoot, RepoPath,
+    Change, ChangeEvolution, ChangeId, Digest, EvolutionEdge, EvolutionKind, GitOid,
+    GitOidAlgorithm, PatchMutation, PatchProposal, Preimage, ProofRoot, RepoPath,
 };
 use bullet_git_workspace::{
     validate_batch, AgentRepository, CapabilityError, ExpectedAuthority, PatchHunk, PatchOp,
-    ScopeGrant,
+    ScopeGrant, WorkspaceLineage,
 };
 
 fn synth_oid(fields: &[&[u8]]) -> GitOid {
@@ -31,6 +31,7 @@ pub struct MemoryRepository {
     grant: ScopeGrant,
     base: GitOid,
     is_worktree: bool,
+    lineage: WorkspaceLineage,
 }
 
 impl MemoryRepository {
@@ -44,6 +45,7 @@ impl MemoryRepository {
             grant,
             base: synth_oid(&[b"memory.base"]),
             is_worktree: false,
+            lineage: WorkspaceLineage::new(),
         }
     }
 
@@ -286,6 +288,27 @@ impl AgentRepository for MemoryRepository {
         };
         Candidate::from_manifest(manifest, "memory".into()).map_err(Into::into)
     }
+
+    fn query_lineage(
+        &self,
+        auth: &AuthorityEnvelope,
+        change_id: &ChangeId,
+    ) -> Result<ChangeEvolution, CapabilityError> {
+        self.expected.require(auth)?;
+        Ok(self.lineage.query(change_id)?)
+    }
+
+    fn record_evolution(
+        &mut self,
+        auth: &AuthorityEnvelope,
+        change: &Change,
+        edge: EvolutionEdge,
+    ) -> Result<(), CapabilityError> {
+        self.expected.require(auth)?;
+        self.lineage.record_change(change.clone())?;
+        self.lineage.record_edge(&change.id, edge)?;
+        Ok(())
+    }
 }
 
 fn require_memory_candidate_field(
@@ -519,5 +542,10 @@ mod tests {
         assert_ne!(repaired.id, candidate.id);
         assert_eq!(repaired.manifest.change_id, candidate.manifest.change_id);
         assert_eq!(repaired.manifest.parent_candidate_ids, vec![candidate.id]);
+        repo.record_evolution(&auth, &change(), edge)
+            .expect("lineage");
+        let evo = repo.query_lineage(&auth, &change().id).expect("query");
+        assert_eq!(evo.edges.len(), 1);
+        assert!(!evo.edges[0].invalidates_evidence());
     }
 }

@@ -3,6 +3,7 @@
 use crate::cas::{CasError, ImmutableCas};
 use crate::clone::{guard_repository, PrivateClone};
 use crate::generation::{GenerationError, StagedGeneration};
+use crate::lineage::WorkspaceLineage;
 use crate::patch::{validate_batch, PatchHunk, PatchOp};
 use crate::safe_git::{FileProtocol, HeadState};
 use crate::scope::ScopeGrant;
@@ -10,8 +11,8 @@ use crate::status::{parse_status_line, StatusEntry};
 use crate::CapabilityError;
 use bullet_git_journal::{Checkpoint, DurableJournal, JournalMutation};
 use bullet_git_types::{
-    AuthorityEnvelope, Candidate, CandidateProvenance, Change, Digest, GitOid, PatchMutation,
-    PatchProposal, Preimage, RepoPath, WireAuthorityToken,
+    AuthorityEnvelope, Candidate, CandidateProvenance, Change, ChangeEvolution, ChangeId, Digest,
+    EvolutionEdge, GitOid, PatchMutation, PatchProposal, Preimage, RepoPath, WireAuthorityToken,
 };
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -91,6 +92,29 @@ pub trait AgentRepository {
         change: &Change,
         provenance: &CandidateProvenance,
     ) -> Result<Candidate, CapabilityError>;
+
+    /// Query the durable Change graph. A ChangeId never authorizes integration.
+    ///
+    /// # Errors
+    ///
+    /// Missing Change or authority failure.
+    fn query_lineage(
+        &self,
+        auth: &AuthorityEnvelope,
+        change_id: &ChangeId,
+    ) -> Result<ChangeEvolution, CapabilityError>;
+
+    /// Record one evolution edge after a new Candidate exists.
+    ///
+    /// # Errors
+    ///
+    /// Missing Change or authority failure.
+    fn record_evolution(
+        &mut self,
+        auth: &AuthorityEnvelope,
+        change: &Change,
+        edge: EvolutionEdge,
+    ) -> Result<(), CapabilityError>;
 }
 
 /// Expected authority captured at workspace creation.
@@ -162,6 +186,7 @@ pub struct RealRepository {
     cas: ImmutableCas,
     checkpoint_count: Cell<u64>,
     healthy: bool,
+    lineage: WorkspaceLineage,
 }
 
 impl RealRepository {
@@ -185,6 +210,7 @@ impl RealRepository {
             cas,
             checkpoint_count: Cell::new(0),
             healthy: true,
+            lineage: WorkspaceLineage::new(),
         };
         repository.guard()?;
         repository.require_private_branch()?;

@@ -133,4 +133,27 @@ impl AgentRepository for RealRepository {
         self.publish_stage(stage, checkpoint)?;
         Ok(candidate)
     }
+
+    fn query_lineage(
+        &self,
+        auth: &AuthorityEnvelope,
+        change_id: &ChangeId,
+    ) -> Result<ChangeEvolution, CapabilityError> {
+        self.require_healthy()?;
+        self.expected.require(auth)?;
+        Ok(self.lineage.query(change_id)?)
+    }
+
+    fn record_evolution(
+        &mut self,
+        auth: &AuthorityEnvelope,
+        change: &Change,
+        edge: EvolutionEdge,
+    ) -> Result<(), CapabilityError> {
+        self.require_healthy()?;
+        self.expected.require(auth)?;
+        self.lineage.record_change(change.clone())?;
+        self.lineage.record_edge(&change.id, edge)?;
+        Ok(())
+    }
 }

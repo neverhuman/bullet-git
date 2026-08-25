@@ -37,6 +37,17 @@ pub enum EvolutionKind {
     GeneratedRefresh,
 }
 
+impl EvolutionKind {
+    /// Whether dependent Evidence must be invalidated.
+    #[must_use]
+    pub const fn invalidates_evidence(self) -> bool {
+        matches!(
+            self,
+            Self::Rebase | Self::Squash | Self::Split | Self::MergeComposition | Self::CherryPick
+        )
+    }
+}
+
 /// One typed evolution edge. The ChangeId may survive; the CandidateId never does.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +58,14 @@ pub struct EvolutionEdge {
     pub to: CandidateId,
     /// Kind.
     pub kind: EvolutionKind,
+}
+
+impl EvolutionEdge {
+    /// Evidence bound to `from` is unusable after this edge when the kind rewrites identity.
+    #[must_use]
+    pub const fn invalidates_evidence(&self) -> bool {
+        self.kind.invalidates_evidence()
+    }
 }
 
 /// Logical change. Narrative fields influence the controlled commit, but are
@@ -222,18 +241,7 @@ impl CandidateManifest {
         if self.attempt_fence == 0 {
             return Err(CandidateManifestError::InvalidFence);
         }
-        for path in &self.actual_scope {
-            if !self
-                .granted_scope
-                .iter()
-                .any(|grant| path_is_within(grant.as_str(), path.as_str()))
-            {
-                return Err(CandidateManifestError::ActualScopeExceedsGrant(
-                    path.to_string(),
-                ));
-            }
-        }
-        Ok(())
+        write_set_within_grant(&self.granted_scope, &self.actual_scope)
     }
 }
 
@@ -348,6 +356,28 @@ impl ProofRoot {
             root: Digest::of(&buf),
         }
     }
+}
+
+/// Object write-set proof. AST/symbol advice must not replace this check.
+///
+/// # Errors
+///
+/// `ACTUAL_SCOPE_EXCEEDS_GRANT` for any observed path outside the grant.
+pub fn write_set_within_grant(
+    granted: &[RepoPath],
+    actual: &[RepoPath],
+) -> Result<(), CandidateManifestError> {
+    for path in actual {
+        if !granted
+            .iter()
+            .any(|grant| path_is_within(grant.as_str(), path.as_str()))
+        {
+            return Err(CandidateManifestError::ActualScopeExceedsGrant(
+                path.to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn path_is_within(grant: &str, path: &str) -> bool {

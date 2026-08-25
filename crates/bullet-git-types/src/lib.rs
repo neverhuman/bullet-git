@@ -3,18 +3,21 @@
 mod authority;
 mod change;
 mod ids;
+mod lineage;
 mod proposal;
 pub mod schema_bundle;
 
 pub use authority::{AuthorityEnvelope, AuthorityError, WireAuthorityToken};
 pub use change::{
-    Candidate, CandidateManifest, CandidateManifestError, CandidateProvenance, Change,
-    EvolutionEdge, EvolutionKind, ProofRoot, CANDIDATE_MANIFEST_SCHEMA_VERSION,
+    write_set_within_grant, Candidate, CandidateManifest, CandidateManifestError,
+    CandidateProvenance, Change, EvolutionEdge, EvolutionKind, ProofRoot,
+    CANDIDATE_MANIFEST_SCHEMA_VERSION,
 };
 pub use ids::{
     AttemptId, CandidateId, ChangeId, CheckpointId, ContentId, GateId, GitOid, GitOidAlgorithm,
     GraphRevisionId, PlanRevisionId, RepositoryId, VariantId, WorkPackageId,
 };
+pub use lineage::{ChangeEvolution, LineageError, LineageGraph};
 pub use proposal::{
     PatchMutation, PatchOperation, PatchProposal, Preimage, ProposalError, RepoPath,
     PATCH_PROPOSAL_SCHEMA_VERSION,
