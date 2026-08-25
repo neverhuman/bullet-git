@@ -2,7 +2,7 @@
 
 Status: component primitives (workspace daemon); no transaction or production claim
 Owner: Bullet Farm maintainers
-Last reviewed: 2026-08-24
+Last reviewed: 2026-08-25
 Applies to: bullet-git
 
 ## Role split
@@ -18,7 +18,7 @@ that boundary everything is ordinary blobs, trees, commits, and refs.
 
 | Crate | Role |
 |---|---|
-| `bullet-git-types` | full 256-bit lowercase ChangeId/CandidateId/CheckpointId, validated algorithm-tagged `GitOid` (`sha1:<40 lowercase hex>` or `sha256:<64 lowercase hex>`), `Candidate` (spec §6.13 minus `toolchain_digest`; `lineage_subject` and `environment_digest` are optional and outside `CandidateId`/`ProofRoot`), `ProofRoot`, framed digests, `WireAuthorityToken` |
+| `bullet-git-types` | full 256-bit lowercase ChangeId/CandidateId/CheckpointId, validated algorithm-tagged `GitOid` (`sha1:<40 lowercase hex>` or `sha256:<64 lowercase hex>`), strict `CandidateProvenance`/`CandidateManifest` with mandatory environment, toolchain, snapshot, and ordered parent-Candidate lineage subjects, `ProofRoot`, framed digests, `WireAuthorityToken` |
 | `bullet-git-journal` | append-only workspace journal and checkpoints |
 | `bullet-git-workspace` | `SafeGit` hardened command builder and local-config admission, mirror-under-lock source fetch, `PrivateClone` lifecycle (§20.2), `ScopeGrant`, `RealRepository` capability API over real Git |
 | `bullet-gitd` | the stdio daemon binary plus `MemoryRepository`, an in-process fake with the same authority and scope rules |
@@ -136,17 +136,17 @@ tree.
   rewritten), deletion of the whole mirror, and a GC loop concurrent with
   clone creation and with commits inside existing workspaces: every private
   clone stays `fsck --full --strict` clean, every reachable object is
-  readable from its own store, and checkout plus commit still work. A CoW
-  reflink fast path is designed, not implemented. The object copy today is
-  git's own `--dissociate` repack, and git has no reflink mode; the fast
-  path would be `git init` + a no-follow copy of the mirror's `objects/`
-  through `std::fs::copy` (Linux `copy_file_range`, which is a reflink on
-  XFS/btrfs and a plain copy elsewhere — `cp --reflink=auto` semantics with
-  no new dependency and no `unsafe`) + a ref fetch from the mirror path
-  under the same lock, followed by the same guards. It is not implemented
-  because it replaces the §20.2 mechanism these tests pin and cannot be
-  proven on the ext4 proof host (no CoW filesystem); it stays a documented
-  design until a CoW-capable proof lane exists.
+  readable from its own store, and checkout plus commit still work. The
+  Rust-owned `reflink.rs` copy primitive is implemented: on Linux it attempts
+  `FICLONE` against opened regular-file descriptors, checks source descriptor
+  identity, and otherwise copies at most the admitted source length before
+  requiring the exact byte count. It rejects symlinks and special entries,
+  removes a partial destination on failure, and never resolves an ambient
+  `cp`; `tests/reflink.rs` proves the fallback bytes and hostile-`PATH` case.
+  `PrivateClone::create` does not call this primitive yet: current workspace
+  object materialization remains Git's `--dissociate` copy. Integrating the
+  CoW path under the mirror lock and certifying it on a CoW-capable proof host
+  therefore remain open; the primitive alone is not a clone capability.
 - **Hostile-git controls (spec §20.3).** The child environment is cleared
   (strips every inherited `GIT_*` variable) and rebuilt with per-workspace
   `HOME`/`XDG_CONFIG_HOME`/`XDG_CACHE_HOME`, `GIT_CONFIG_NOSYSTEM=1`,
@@ -171,14 +171,20 @@ tree.
   segments ending in `.` or a space, and symlink traversal or symlink
   targets. Validation is all-or-nothing — one bad path leaves the tree
   untouched.
-- **Batch admission.** A batch is refused before any mutation when two
+- **Batch admission.** Execution is refused before any mutation when two
   entries normalize to the same path (`DUPLICATE_PATH`) or fold to the same
   case-insensitive key (`PATH_COLLISION`); multi-step sequences on one path
-  must be collapsed by the proposal producer.
-  Empty batches and batches above 1,024 operations fail with
-  `INVALID_OPERATION_COUNT`; a replacement body above 1 MiB fails with
-  `CONTENT_TOO_LARGE`. These values are identical to the frozen
-  `bullet-wire` proposal defaults.
+  must be collapsed by the proposal producer. The workspace execution policy
+  accepts 1..=128 unique paths, at most 1 MiB per replacement body, and at
+  most 32 MiB of replacement content across the batch. Exceeding the last
+  bound returns `AGGREGATE_CONTENT_TOO_LARGE`.
+  The separate schema-1 `PatchProposal` wire validator still admits 1..=1,024
+  operations and the 1 MiB per-body bound, but has no aggregate-content bound.
+  `apply_proposal` runs execution admission after wire validation, so a
+  129..=1,024-operation proposal can decode and is then refused with
+  `INVALID_OPERATION_COUNT` before mutation. Aligning the immutable proposal
+  contract to the execution policy is an open contract gap; the 1,024 wire
+  maximum must not be represented as a workspace capability.
 - **Deletes.** A patch entry may carry `"op": "delete"`. The target must
   be an existing regular file on disk when the batch is validated (else
   typed `PATH_ABSENT`), scope rules apply exactly as for writes, and the
@@ -193,12 +199,17 @@ tree.
   scan classifies every entry; unclassified untracked files outside scope
   refuse preparation. The commit uses the fixed identity
   `Bullet Farm <farm@bullet.local>` and a caller-fixed date on the private
-  branch. The result carries exact algorithm-tagged
-  `base_commit`/`head_commit`/`tree_hash`
-  (`git rev-parse HEAD^{tree}`) and `patch_hash` = BLAKE3 of the
-  `git diff base..head` bytes. `CandidateId` is content-derived from
-  change + tree + head, so two different trees under one Change can never
-  share an id.
+  branch. The caller must provide the strict `CandidateProvenance`, including
+  exact repository/Attempt/fence/work-package/variant/plan/graph/checkpoint
+  subjects, ordered `parent_candidate_ids`, granted scope, four snapshot IDs,
+  `environment_digest`, and `toolchain_digest`; missing or unknown fields are
+  refused. BulletGit derives actual scope and exact algorithm-tagged
+  `base_commit`/`head_commit`/`tree_oid`, plus `patch_digest` = BLAKE3 of the
+  `git diff base..head` bytes. `CandidateId` hashes the complete canonical
+  manifest, so environment, toolchain, and lineage changes produce a new
+  identity. The separate reusable content ID hashes only repository/base/head/
+  tree/patch content. `ProofRoot` binds the Candidate ID and content ID and
+  also derives Change/ordered-parent lineage from the manifest.
 - **Structural fail-closed checks.** `.git` as a file (the on-disk shape of
   a worktree) → `WORKTREE_FORBIDDEN`; `rev-parse --show-toplevel` mismatch →
   `WRONG_REPOSITORY`; sequencer files (`CHERRY_PICK_HEAD`/`MERGE_HEAD`/
@@ -249,8 +260,9 @@ cannot create that session until the immutable authority consumer lands.
 | `clone` | `source_repo`, algorithm-tagged `base_sha`, `root`, `created_at`, `allowed_prefixes`, `commit_date` (variant/attempt/nonce come from the token) | `repo_dir`, `runtime_dir`, `branch`, tagged `base_sha` |
 | `read_tree` | — | `files`: tracked paths |
 | `apply_change` | `patches`: `[{path, op?, contents_hex?}]` — `op` is `write` (default; full-file `contents_hex` required, hex) or `delete` (must omit `contents_hex`) | `applied`: count |
+| `apply_proposal` | `proposal`: strict schema-1 `PatchProposal` (wire maximum 1,024; execution maximum 128) | `applied`: count; oversized execution batches refuse before mutation |
 | `checkpoint` | — | Checkpoint JSON incl. `git_tree` |
-| `prepare_candidate` | `change_seed`, `mission` | Candidate JSON (exact algorithm-tagged Git OIDs, `patch_hash`; `lineage_subject`/`environment_digest` are `null` until a producer populates them) |
+| `prepare_candidate` | strict `change` plus complete `provenance` (`environment_digest`, `toolchain_digest`, ordered `parent_candidate_ids`, and every other field are mandatory) | provenance-bound Candidate JSON with exact tagged Git OIDs and patch digest |
 | `preserve` | `destination` (new absolute canonical external directory) | opaque `preservation_receipt`, receipt/artifact digests, canonical destination |
 | `cleanup` | `preservation_receipt`, `deleted_at` | `tombstone`, receipt digest, `verified` |
 
@@ -273,7 +285,7 @@ Error codes: `AUTHORITY_CONTRACT_UNAVAILABLE`, `AUTHORITY_REFUSED`,
 `MUTATION_OUTCOME_UNKNOWN`, `MUTATION_LEDGER_IO_FAILED`, `UNAUTHORIZED`,
 `STALE_AUTHORITY`, `OUT_OF_SCOPE`,
 `PATH_ABSENT`, `DUPLICATE_PATH`, `PATH_COLLISION`, `INVALID_OPERATION_COUNT`,
-`CONTENT_TOO_LARGE`, `SYMLINK_FORBIDDEN`,
+`CONTENT_TOO_LARGE`, `AGGREGATE_CONTENT_TOO_LARGE`, `SYMLINK_FORBIDDEN`,
 `WORKTREE_FORBIDDEN`, `WRONG_REPOSITORY`, `WRONG_BRANCH`,
 `SEQUENCER_ACTIVE`, `UNCLASSIFIED_UNTRACKED`, `BASE_MISSING`,
 `MIRROR_LOCK_TIMEOUT`, `PRESERVATION_INVALID_DESTINATION`,
@@ -290,5 +302,5 @@ that the unpublished signed-authority consumer exists.
 Every digest over more than one variable-length field length-prefixes each
 field (u64 LE length + bytes) via `bullet_git_types::frame`, so
 `["ab","c"]` and `["a","bc"]` can never collide. This applies to
-`ProofRoot::compute`, journal checkpoints, `CandidateId::from_content`, and
-the MemoryRepository preimage.
+`ProofRoot`, journal checkpoints, the canonical Candidate content/provenance
+identities, and the MemoryRepository preimage.

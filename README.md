@@ -25,11 +25,19 @@ just fast
 ## Readiness
 
 This repository currently proves component primitives: private dissociated clones, scoped writes
-and deletes, exact Candidates, journals, preservation checks, and daemon protocol behavior. Its
-legacy authority token is not a signed production grant. `Candidate` carries the spec §6.13
-fields except `toolchain_digest`, but `lineage_subject` and `environment_digest` are not yet
-populated by the daemon and do not bind `CandidateId` or `ProofRoot`, so these are not the
-canonical transaction records.
+and deletes, exact Candidates, journals, preservation checks, daemon protocol behavior, and a
+Rust-owned reflink-or-byte-copy primitive. Its legacy authority token is not a signed production
+grant. `CandidateProvenance` and `CandidateManifest` require exact environment and toolchain
+digests plus ordered parent-Candidate lineage; the full manifest binds `CandidateId`, and
+`ProofRoot` binds that Candidate plus its Change/parent lineage. `PrivateClone::create` still uses
+Git's `--reference-if-able --dissociate` path, so the reflink primitive is not yet the clone path.
+
+Execution policy admits at most 128 unique changed paths, 1 MiB per replacement body, and 32 MiB
+of replacement content in aggregate. The separate schema-1 `PatchProposal` wire validator still
+admits up to 1,024 operations and enforces only the per-body byte bound before execution. That
+1,024-versus-128 split is an open contract-alignment gap: proposals above the execution limit can
+decode but are refused before a workspace mutation, and the larger wire bound is not an execution
+capability.
 
 There is no five-plane transaction receipt or production-readiness claim here. Protected refs,
 checks, integration, and observation remain forge/control-plane responsibilities and are not
