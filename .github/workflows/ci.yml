@@ -18,8 +18,6 @@ jobs:
     name: source scan
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    outputs:
-      observation: ${{ steps.artifacts.outputs.observation }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -29,17 +27,17 @@ jobs:
       - name: Scan source and lockfiles before dependency installation
         run: bash scripts/ci-local.sh source-scan
       - name: Validate sanitized observation
-        id: artifacts
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
         run: |
-          bash ops/ci/artifact-check.sh source-scan
-          echo "observation=present" >> "$GITHUB_OUTPUT"
+          bash ops/ci/artifact-check.sh source-scan "$EXPECTED_COMMIT"
       - name: Upload source-scan observation
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: bullet-git-source-scan
-          path: .ci-artifacts/observations/source-scan.json
+          name: bullet-git-source-scan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .ci-artifacts/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -49,8 +47,6 @@ jobs:
     needs: source_scan
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    outputs:
-      observation: ${{ steps.artifacts.outputs.observation }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -65,19 +61,17 @@ jobs:
       - name: Run fast lane
         run: bash scripts/ci-local.sh fast
       - name: Validate sanitized JUnit and observation
-        id: artifacts
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
         run: |
-          bash ops/ci/artifact-check.sh fast
-          echo "observation=present" >> "$GITHUB_OUTPUT"
+          bash ops/ci/artifact-check.sh fast "$EXPECTED_COMMIT"
       - name: Upload fast diagnostics
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: bullet-git-fast
-          path: |
-            .ci-artifacts/observations/fast.json
-            .ci-artifacts/reports/fast.junit.xml
+          name: bullet-git-fast-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .ci-artifacts/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -87,8 +81,6 @@ jobs:
     needs: source_scan
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    outputs:
-      observation: ${{ steps.artifacts.outputs.observation }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -109,17 +101,17 @@ jobs:
       - name: Run lint lane
         run: bash scripts/ci-local.sh lint
       - name: Validate sanitized observation
-        id: artifacts
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
         run: |
-          bash ops/ci/artifact-check.sh lint
-          echo "observation=present" >> "$GITHUB_OUTPUT"
+          bash ops/ci/artifact-check.sh lint "$EXPECTED_COMMIT"
       - name: Upload lint observation
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: bullet-git-lint
-          path: .ci-artifacts/observations/lint.json
+          name: bullet-git-lint-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .ci-artifacts/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -129,8 +121,6 @@ jobs:
     needs: source_scan
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    outputs:
-      observation: ${{ steps.artifacts.outputs.observation }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -145,19 +135,17 @@ jobs:
       - name: Run contract lane
         run: bash scripts/ci-local.sh contract
       - name: Validate sanitized JUnit and observation
-        id: artifacts
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
         run: |
-          bash ops/ci/artifact-check.sh contract
-          echo "observation=present" >> "$GITHUB_OUTPUT"
+          bash ops/ci/artifact-check.sh contract "$EXPECTED_COMMIT"
       - name: Upload contract diagnostics
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: bullet-git-contract
-          path: |
-            .ci-artifacts/observations/contract.json
-            .ci-artifacts/reports/contract.junit.xml
+          name: bullet-git-contract-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .ci-artifacts/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -167,8 +155,6 @@ jobs:
     needs: source_scan
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    outputs:
-      observation: ${{ steps.artifacts.outputs.observation }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -185,17 +171,17 @@ jobs:
       - name: Run security lane
         run: bash scripts/ci-local.sh security
       - name: Validate sanitized observation
-        id: artifacts
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
         run: |
-          bash ops/ci/artifact-check.sh security
-          echo "observation=present" >> "$GITHUB_OUTPUT"
+          bash ops/ci/artifact-check.sh security "$EXPECTED_COMMIT"
       - name: Upload security observation
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: bullet-git-security
-          path: .ci-artifacts/observations/security.json
+          name: bullet-git-security-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .ci-artifacts/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -205,8 +191,6 @@ jobs:
     needs: source_scan
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    outputs:
-      observation: ${{ steps.artifacts.outputs.observation }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -217,17 +201,17 @@ jobs:
       - name: Run docs lane
         run: bash scripts/ci-local.sh docs
       - name: Validate sanitized observation
-        id: artifacts
         if: ${{ !cancelled() }}
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
         run: |
-          bash ops/ci/artifact-check.sh docs
-          echo "observation=present" >> "$GITHUB_OUTPUT"
+          bash ops/ci/artifact-check.sh docs "$EXPECTED_COMMIT"
       - name: Upload docs observation
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: bullet-git-docs
-          path: .ci-artifacts/observations/docs.json
+          name: bullet-git-docs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .ci-artifacts/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -238,29 +222,27 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      EXPECTED_COMMIT: ${{ github.sha }}
+      SOURCE_SCAN_RESULT: ${{ needs.source_scan.result }}
+      FAST_RESULT: ${{ needs.fast.result }}
+      LINT_RESULT: ${{ needs.lint.result }}
+      CONTRACT_RESULT: ${{ needs.contract.result }}
+      SECURITY_RESULT: ${{ needs.security.result }}
+      DOCS_RESULT: ${{ needs.docs.result }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Download this run's atomic observations and sanitized reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: bullet-git-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .ci-artifacts/atomic
+          merge-multiple: true
       - name: Converge exact CI / required context
-        env:
-          SOURCE_SCAN_RESULT: ${{ needs.source_scan.result }}
-          SOURCE_SCAN_OBSERVATION: ${{ needs.source_scan.outputs.observation }}
-          FAST_RESULT: ${{ needs.fast.result }}
-          FAST_OBSERVATION: ${{ needs.fast.outputs.observation }}
-          LINT_RESULT: ${{ needs.lint.result }}
-          LINT_OBSERVATION: ${{ needs.lint.outputs.observation }}
-          CONTRACT_RESULT: ${{ needs.contract.result }}
-          CONTRACT_OBSERVATION: ${{ needs.contract.outputs.observation }}
-          SECURITY_RESULT: ${{ needs.security.result }}
-          SECURITY_OBSERVATION: ${{ needs.security.outputs.observation }}
-          DOCS_RESULT: ${{ needs.docs.result }}
-          DOCS_OBSERVATION: ${{ needs.docs.outputs.observation }}
+        if: ${{ always() }}
         run: |
-          bash ops/ci/aggregate.sh \
-            "$SOURCE_SCAN_RESULT" "$SOURCE_SCAN_OBSERVATION" \
-            "$FAST_RESULT" "$FAST_OBSERVATION" \
-            "$LINT_RESULT" "$LINT_OBSERVATION" \
-            "$CONTRACT_RESULT" "$CONTRACT_OBSERVATION" \
-            "$SECURITY_RESULT" "$SECURITY_OBSERVATION" \
-            "$DOCS_RESULT" "$DOCS_OBSERVATION"
+          bash ops/ci/aggregate.sh .ci-artifacts/atomic "$EXPECTED_COMMIT" \
+            "$SOURCE_SCAN_RESULT" "$FAST_RESULT" "$LINT_RESULT" \
+            "$CONTRACT_RESULT" "$SECURITY_RESULT" "$DOCS_RESULT"

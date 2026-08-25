@@ -6,6 +6,8 @@ cd "$REPO_ROOT"
 log "lint lane: formatting, Clippy, CI meta-guards, and pinned source linters"
 bash ops/ci/local-parity-test.sh
 bash ops/ci/test-partitions.sh
+bash ops/ci/junit-test.sh
+bash ops/ci/artifact-check-test.sh
 bash ops/ci/aggregate-test.sh
 bash ops/ci/workflow-policy-test.sh
 cargo fmt --all --check

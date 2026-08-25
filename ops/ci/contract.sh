@@ -6,5 +6,10 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
 log "contract lane: workspace capability API and daemon process partition"
-run_partition contract contract "$CONTRACT_FILTER" "$CONTRACT_EXPECTED_TESTS"
+status=0
+run_partition contract contract "$CONTRACT_FILTER" "$CONTRACT_EXPECTED_TESTS" || status=$?
+if [[ -s .ci-artifacts/reports/contract.junit.xml ]]; then
+  bash ops/ci/sanitize-junit.sh contract
+fi
+[[ "$status" -eq 0 ]] || exit "$status"
 log "contract lane passed"

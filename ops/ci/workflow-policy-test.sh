@@ -30,6 +30,19 @@ grep -Fq "$expected_cancel" "$required"
 grep -q '^    name: required$' "$required"
 expected_always="if: \${{ always() }}"
 grep -Fq "$expected_always" "$required"
+grep -Eq 'uses: actions/download-artifact@[0-9a-f]{40}' "$required"
+expected_commit_binding="EXPECTED_COMMIT: \${{ github.sha }}"
+expected_artifact_pattern="pattern: bullet-git-*-\${{ github.run_id }}-\${{ github.run_attempt }}"
+grep -Fq "$expected_commit_binding" "$required"
+grep -Fq "$expected_artifact_pattern" "$required"
+[[ "$(grep -c 'name: bullet-git-.*github.run_id.*github.run_attempt' "$required")" -eq 6 ]] || {
+  echo '[ci] RUN_BOUND_ARTIFACT_NAME_DRIFT' >&2
+  exit 1
+}
+if grep -q 'needs\..*outputs\.observation' "$required"; then
+  echo '[ci] UNVERIFIED_OUTPUT_AGGREGATION' >&2
+  exit 1
+fi
 grep -q 'toolchain: 1.97.1' "$required"
 [[ "$(grep -c 'run: bash ops/ci/install-gitleaks.sh' "$required")" -eq 2 ]] || {
   echo '[ci] REQUIRED_GITLEAKS_INSTALLATION_DRIFT' >&2
@@ -40,4 +53,4 @@ grep -q 'runs-on: macos-15' "$scheduled"
 grep -q 'name: Windows compile and typed refusal' "$scheduled"
 grep -q 'runs-on: windows-2025' "$scheduled"
 grep -q 'fetch-depth: 0' "$scheduled"
-log "workflow policy: triggers, permissions, pins, runners, cancellation, and aggregator are exact"
+log "workflow policy: triggers, pins, exact-run artifacts, expected commit, and aggregator are exact"
