@@ -32,7 +32,7 @@ pub use repository::{AgentRepository, CommitIdentity, ExpectedAuthority, RealRep
 pub use safe_git::{FileProtocol, GitOutput, HeadState, SafeGit};
 pub use scope::{normalize_rel_path, ScopeGrant};
 
-use bullet_git_types::{AuthorityError, ProposalError, TypesError};
+use bullet_git_types::{AuthorityError, CandidateManifestError, ProposalError, TypesError};
 use thiserror::Error;
 
 /// Capability error with stable reason codes.
@@ -50,6 +50,16 @@ pub enum CapabilityError {
         /// Active writer attempt.
         expected: String,
         /// Proposal-producing attempt.
+        found: String,
+    },
+    /// Candidate provenance differs from an active writer or repository fact.
+    #[error("candidate subject mismatch at {field}: expected {expected}, found {found}")]
+    CandidateSubjectMismatch {
+        /// Exact field that differed.
+        field: &'static str,
+        /// Active local subject.
+        expected: String,
+        /// Caller-supplied subject.
         found: String,
     },
     /// Proposal base checkpoint does not equal the active checkpoint.
@@ -149,6 +159,9 @@ pub enum CapabilityError {
     /// Canonical proposal validation failed.
     #[error(transparent)]
     Proposal(#[from] ProposalError),
+    /// Canonical Candidate manifest validation failed.
+    #[error(transparent)]
+    CandidateManifest(#[from] CandidateManifestError),
 }
 
 impl CapabilityError {
@@ -159,6 +172,7 @@ impl CapabilityError {
             Self::Unauthorized(_) => "UNAUTHORIZED",
             Self::StaleAuthority(_) => "STALE_AUTHORITY",
             Self::ProposalAttemptMismatch { .. } => "PROPOSAL_ATTEMPT_MISMATCH",
+            Self::CandidateSubjectMismatch { .. } => "CANDIDATE_SUBJECT_MISMATCH",
             Self::StaleCheckpoint(_) => "STALE_CHECKPOINT",
             Self::StalePreimage(_) => "STALE_PREIMAGE",
             Self::OutOfScope(_) => "OUT_OF_SCOPE",
@@ -184,6 +198,7 @@ impl CapabilityError {
             Self::Io(_) => "IO_FAILED",
             Self::Types(_) => "INVALID_TYPES",
             Self::Proposal(error) => error.reason_code(),
+            Self::CandidateManifest(error) => error.reason_code(),
         }
     }
 }

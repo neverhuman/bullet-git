@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const NONCE: [u8; 32] = [9u8; 32];
-pub const ATTEMPT: &str = "atm_fixture01";
-pub const VARIANT: &str = "var_fixture01";
+pub const ATTEMPT: &str = "atm_1111111111111111111111111111111111111111111111111111111111111111";
+pub const VARIANT: &str = "var_2222222222222222222222222222222222222222222222222222222222222222";
 pub const FENCE: u64 = 5;
 pub const CREATED_AT: &str = "2026-08-24T00:00:00Z";
 pub const COMMIT_DATE: &str = "2026-08-24T00:00:00+00:00";

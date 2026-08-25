@@ -58,50 +58,79 @@ impl AgentRepository for RealRepository {
         self.validate_active_checkpoint()
     }
 
-    fn prepare_candidate(
-        &mut self,
+    fn validate_candidate_preparation(
+        &self,
         auth: &AuthorityEnvelope,
-        change: &Change,
-    ) -> Result<Candidate, CapabilityError> {
+        provenance: &CandidateProvenance,
+    ) -> Result<(), CapabilityError> {
         self.require_healthy()?;
-        self.expected.require(auth)?;
+        let token = self.expected.require(auth)?;
         self.guard()?;
         sequencer_check(self.workspace.repo_dir())?;
         self.require_private_branch()?;
         let entries = self.status_scan()?;
-        let actual_scope = self.classify_scan(&entries)?;
+        self.classify_scan(&entries)?;
+        let base_checkpoint = self.validate_active_checkpoint()?;
+        let base = GitOid::new(self.workspace.base_sha())?;
+        self.require_candidate_provenance(&token, provenance, &base_checkpoint, &base)
+    }
+
+    fn prepare_candidate(
+        &mut self,
+        auth: &AuthorityEnvelope,
+        change: &Change,
+        provenance: &CandidateProvenance,
+    ) -> Result<Candidate, CapabilityError> {
+        self.validate_candidate_preparation(auth, provenance)?;
+        let token = self.expected.require(auth)?;
+        let entries = self.status_scan()?;
+        let actual_scope = self
+            .classify_scan(&entries)?
+            .into_iter()
+            .map(|path| path.parse::<RepoPath>())
+            .collect::<Result<Vec<_>, _>>()?;
+        let base_checkpoint = self.validate_active_checkpoint()?;
+        let base = GitOid::new(self.workspace.base_sha())?;
+        self.require_candidate_provenance(&token, provenance, &base_checkpoint, &base)?;
         let stage = self.workspace.stage_generation()?;
         let stage_repo = stage.repo_dir();
         let stage_journal = DurableJournal::open(stage.journal_dir())?;
         let (head, tree) = self.commit_candidate(&stage_repo, change)?;
-        let checkpoint = self.write_tree_checkpoint(&stage_repo, &stage_journal)?;
-        self.publish_stage(stage, checkpoint)?;
-
-        let base = GitOid::new(self.workspace.base_sha())?;
         let range = format!("{}..{}", base.hex(), head.hex());
         let patch = self.workspace.git().run(
-            Some(self.workspace.repo_dir()),
+            Some(&stage_repo),
             FileProtocol::Never,
             &["diff", &range],
             &[],
         )?;
-        let patch_hash = Digest::of(&patch.stdout);
-        let manifest = self.workspace.manifest();
-        Ok(Candidate {
-            id: CandidateId::from_content(&change.id, &tree, &head),
-            change: change.id.clone(),
+        let manifest = bullet_git_types::CandidateManifest {
+            schema_version: provenance.schema_version,
+            repository_id: provenance.repository_id.clone(),
+            change_id: change.id.clone(),
+            producing_attempt_id: provenance.producing_attempt_id.clone(),
+            attempt_fence: provenance.attempt_fence,
+            work_package_id: provenance.work_package_id.clone(),
+            variant_id: provenance.variant_id.clone(),
+            plan_revision_id: provenance.plan_revision_id.clone(),
+            graph_revision_id: provenance.graph_revision_id.clone(),
+            base_checkpoint_id: provenance.base_checkpoint_id.clone(),
             base_commit: base,
             head_commit: head,
-            tree_hash: tree,
-            patch_hash,
-            variant_id: manifest.variant_id.clone(),
-            attempt_id: manifest.attempt_id.clone(),
-            granted_scope: self.grant.allowed_prefixes.clone(),
+            tree_oid: tree,
+            patch_digest: Digest::of(&patch.stdout),
+            parent_candidate_ids: provenance.parent_candidate_ids.clone(),
+            granted_scope: provenance.granted_scope.clone(),
             actual_scope,
-            parent_candidate_id: None,
-            prepared_at: self.identity.date.clone(),
-            lineage_subject: None,
-            environment_digest: None,
-        })
+            context_capsule_id: provenance.context_capsule_id.clone(),
+            configuration_snapshot_id: provenance.configuration_snapshot_id.clone(),
+            policy_snapshot_id: provenance.policy_snapshot_id.clone(),
+            routing_snapshot_id: provenance.routing_snapshot_id.clone(),
+            environment_digest: provenance.environment_digest,
+            toolchain_digest: provenance.toolchain_digest,
+        };
+        let candidate = Candidate::from_manifest(manifest, self.identity.date.clone())?;
+        let checkpoint = self.write_tree_checkpoint(&stage_repo, &stage_journal)?;
+        self.publish_stage(stage, checkpoint)?;
+        Ok(candidate)
     }
 }

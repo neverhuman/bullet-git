@@ -8,8 +8,9 @@ pub mod protocol;
 
 use bullet_git_journal::{Checkpoint, Journal};
 use bullet_git_types::{
-    frame, framed_digest, AuthorityEnvelope, Candidate, CandidateId, Change, Digest, EvolutionEdge,
-    EvolutionKind, GitOid, GitOidAlgorithm, PatchMutation, PatchProposal, Preimage, ProofRoot,
+    frame, framed_digest, AuthorityEnvelope, Candidate, CandidateManifest, CandidateProvenance,
+    Change, Digest, EvolutionEdge, EvolutionKind, GitOid, GitOidAlgorithm, PatchMutation,
+    PatchProposal, Preimage, ProofRoot, RepoPath,
 };
 use bullet_git_workspace::{
     validate_batch, AgentRepository, CapabilityError, ExpectedAuthority, PatchHunk, PatchOp,
@@ -61,22 +62,13 @@ impl MemoryRepository {
     pub fn evolve(from: &Candidate, kind: EvolutionKind, seed: &str) -> (Candidate, EvolutionEdge) {
         let tree = synth_oid(&[b"memory.tree", seed.as_bytes()]);
         let head = synth_oid(&[b"memory.head", seed.as_bytes(), tree.as_str().as_bytes()]);
-        let next = Candidate {
-            id: CandidateId::from_content(&from.change, &tree, &head),
-            change: from.change.clone(),
-            base_commit: from.base_commit.clone(),
-            head_commit: head,
-            tree_hash: tree,
-            patch_hash: Digest::of(seed.as_bytes()),
-            variant_id: from.variant_id.clone(),
-            attempt_id: from.attempt_id.clone(),
-            granted_scope: from.granted_scope.clone(),
-            actual_scope: from.actual_scope.clone(),
-            parent_candidate_id: Some(from.id.clone()),
-            prepared_at: from.prepared_at.clone(),
-            lineage_subject: from.lineage_subject.clone(),
-            environment_digest: from.environment_digest,
-        };
+        let mut manifest = from.manifest.clone();
+        manifest.head_commit = head;
+        manifest.tree_oid = tree;
+        manifest.patch_digest = Digest::of(seed.as_bytes());
+        manifest.parent_candidate_ids = vec![from.id.clone()];
+        let next = Candidate::from_manifest(manifest, from.prepared_at.clone())
+            .expect("evolution from a validated manifest remains valid");
         let edge = EvolutionEdge {
             from: from.id.clone(),
             to: next.id.clone(),
@@ -190,12 +182,64 @@ impl AgentRepository for MemoryRepository {
         Ok(self.journal.checkpoint())
     }
 
+    fn validate_candidate_preparation(
+        &self,
+        auth: &AuthorityEnvelope,
+        provenance: &CandidateProvenance,
+    ) -> Result<(), CapabilityError> {
+        let token = self.expected.require(auth)?;
+        provenance.validate()?;
+        require_memory_candidate_field(
+            "producing_attempt_id",
+            &self.expected.attempt_id,
+            provenance.producing_attempt_id.as_str(),
+        )?;
+        require_memory_candidate_field(
+            "attempt_fence",
+            &self.expected.attempt_fence.to_string(),
+            &provenance.attempt_fence.to_string(),
+        )?;
+        require_memory_candidate_field(
+            "variant_id",
+            &token.variant_id,
+            provenance.variant_id.as_str(),
+        )?;
+        let checkpoint = self.journal.checkpoint();
+        require_memory_candidate_field(
+            "base_checkpoint_id",
+            checkpoint.id.as_str(),
+            provenance.base_checkpoint_id.as_str(),
+        )?;
+        require_memory_candidate_field(
+            "base_commit",
+            self.base.as_str(),
+            provenance.base_commit.as_str(),
+        )?;
+        let local_grant = self
+            .grant
+            .allowed_prefixes
+            .iter()
+            .map(|path| path.parse::<RepoPath>())
+            .collect::<Result<Vec<_>, _>>()?;
+        if provenance.granted_scope != local_grant {
+            return Err(CapabilityError::CandidateSubjectMismatch {
+                field: "granted_scope",
+                expected: serde_json::to_string(&local_grant)
+                    .unwrap_or_else(|_| "<unencodable>".into()),
+                found: serde_json::to_string(&provenance.granted_scope)
+                    .unwrap_or_else(|_| "<unencodable>".into()),
+            });
+        }
+        Ok(())
+    }
+
     fn prepare_candidate(
         &mut self,
         auth: &AuthorityEnvelope,
         change: &Change,
+        provenance: &CandidateProvenance,
     ) -> Result<Candidate, CapabilityError> {
-        self.expected.require(auth)?;
+        self.validate_candidate_preparation(auth, provenance)?;
         let mut files = self.files.clone();
         files.sort_by(|a, b| a.0.cmp(&b.0));
         let mut buf = Vec::new();
@@ -212,21 +256,50 @@ impl AgentRepository for MemoryRepository {
             self.base.as_str().as_bytes(),
             change.id.as_str().as_bytes(),
         ]);
-        Ok(Candidate {
-            id: CandidateId::from_content(&change.id, &tree, &head),
-            change: change.id.clone(),
+        let manifest = CandidateManifest {
+            schema_version: provenance.schema_version,
+            repository_id: provenance.repository_id.clone(),
+            change_id: change.id.clone(),
+            producing_attempt_id: provenance.producing_attempt_id.clone(),
+            attempt_fence: provenance.attempt_fence,
+            work_package_id: provenance.work_package_id.clone(),
+            variant_id: provenance.variant_id.clone(),
+            plan_revision_id: provenance.plan_revision_id.clone(),
+            graph_revision_id: provenance.graph_revision_id.clone(),
+            base_checkpoint_id: provenance.base_checkpoint_id.clone(),
             base_commit: self.base.clone(),
             head_commit: head,
-            tree_hash: tree,
-            patch_hash: content,
-            variant_id: "memory".into(),
-            attempt_id: self.expected.attempt_id.clone(),
-            granted_scope: self.grant.allowed_prefixes.clone(),
-            actual_scope: files.iter().map(|(p, _)| p.clone()).collect(),
-            parent_candidate_id: None,
-            prepared_at: "memory".into(),
-            lineage_subject: None,
-            environment_digest: None,
+            tree_oid: tree,
+            patch_digest: content,
+            parent_candidate_ids: provenance.parent_candidate_ids.clone(),
+            granted_scope: provenance.granted_scope.clone(),
+            actual_scope: files
+                .iter()
+                .map(|(path, _)| path.parse::<RepoPath>())
+                .collect::<Result<Vec<_>, _>>()?,
+            context_capsule_id: provenance.context_capsule_id.clone(),
+            configuration_snapshot_id: provenance.configuration_snapshot_id.clone(),
+            policy_snapshot_id: provenance.policy_snapshot_id.clone(),
+            routing_snapshot_id: provenance.routing_snapshot_id.clone(),
+            environment_digest: provenance.environment_digest,
+            toolchain_digest: provenance.toolchain_digest,
+        };
+        Candidate::from_manifest(manifest, "memory".into()).map_err(Into::into)
+    }
+}
+
+fn require_memory_candidate_field(
+    field: &'static str,
+    expected: &str,
+    found: &str,
+) -> Result<(), CapabilityError> {
+    if expected == found {
+        Ok(())
+    } else {
+        Err(CapabilityError::CandidateSubjectMismatch {
+            field,
+            expected: expected.to_owned(),
+            found: found.to_owned(),
         })
     }
 }
@@ -240,11 +313,22 @@ pub fn bind_proof(candidate: &Candidate) -> ProofRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bullet_git_types::ChangeId;
+    use bullet_git_types::{
+        AttemptId, ChangeId, ContentId, GraphRevisionId, PlanRevisionId, RepositoryId, VariantId,
+        WorkPackageId, CANDIDATE_MANIFEST_SCHEMA_VERSION,
+    };
+
+    fn attempt(seed: &str) -> String {
+        AttemptId::from_seed(seed).to_string()
+    }
+
+    fn variant() -> VariantId {
+        VariantId::from_seed("memory-variant")
+    }
 
     fn expected() -> ExpectedAuthority {
         ExpectedAuthority {
-            attempt_id: "atm_1".into(),
+            attempt_id: attempt("atm_1"),
             attempt_fence: 3,
             workspace_nonce: [7u8; 32],
         }
@@ -254,8 +338,8 @@ mod tests {
         let nonce: Vec<u8> = vec![7u8; 32];
         AuthorityEnvelope {
             token: serde_json::to_vec(&serde_json::json!({
-                "variant_id": "var_1",
-                "attempt_id": attempt,
+                "variant_id": variant(),
+                "attempt_id": AttemptId::from_seed(attempt),
                 "attempt_fence": fence,
                 "workspace_nonce": nonce,
             }))
@@ -273,6 +357,44 @@ mod tests {
             mission: "demo".into(),
             acceptance_root: Digest::of(b"acc"),
         }
+    }
+
+    fn provenance(repo: &MemoryRepository, attempt_seed: &str) -> CandidateProvenance {
+        CandidateProvenance {
+            schema_version: CANDIDATE_MANIFEST_SCHEMA_VERSION,
+            repository_id: RepositoryId::from_seed("memory-repository"),
+            producing_attempt_id: AttemptId::from_seed(attempt_seed),
+            attempt_fence: repo.expected.attempt_fence,
+            work_package_id: WorkPackageId::from_seed("memory-package"),
+            variant_id: variant(),
+            plan_revision_id: PlanRevisionId::from_seed("memory-plan"),
+            graph_revision_id: GraphRevisionId::from_seed("memory-graph"),
+            base_checkpoint_id: repo.journal.checkpoint().id,
+            base_commit: repo.base.clone(),
+            parent_candidate_ids: Vec::new(),
+            granted_scope: repo
+                .grant
+                .allowed_prefixes
+                .iter()
+                .map(|path| path.parse::<RepoPath>().expect("grant"))
+                .collect(),
+            context_capsule_id: ContentId::from_seed("memory-context"),
+            configuration_snapshot_id: ContentId::from_seed("memory-config"),
+            policy_snapshot_id: ContentId::from_seed("memory-policy"),
+            routing_snapshot_id: ContentId::from_seed("memory-route"),
+            environment_digest: Digest::of(b"memory-environment"),
+            toolchain_digest: Digest::of(b"memory-toolchain"),
+        }
+    }
+
+    fn prepare(
+        repo: &mut MemoryRepository,
+        auth: &AuthorityEnvelope,
+        attempt_seed: &str,
+    ) -> Candidate {
+        let provenance = provenance(repo, attempt_seed);
+        repo.prepare_candidate(auth, &change(), &provenance)
+            .expect("prepare")
     }
 
     #[test]
@@ -323,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_id_ignores_application_order_but_tracks_content() {
+    fn content_id_ignores_application_order_while_candidate_binds_checkpoint() {
         let auth = token("atm_1", 3);
         let a = PatchHunk::write("src/a.rs", b"alpha".to_vec());
         let b = PatchHunk::write("src/b.rs", b"beta".to_vec());
@@ -332,11 +454,12 @@ mod tests {
             .expect("apply");
         let mut two = MemoryRepository::new(expected(), grant());
         two.apply_change(&auth, &[b, a]).expect("apply");
-        let c1 = one.prepare_candidate(&auth, &change()).expect("prepare");
-        let c2 = two.prepare_candidate(&auth, &change()).expect("prepare");
-        assert_eq!(c1.id, c2.id);
-        assert_eq!(c1.tree_hash, c2.tree_hash);
-        assert_eq!(c1.patch_hash, c2.patch_hash);
+        let c1 = prepare(&mut one, &auth, "atm_1");
+        let c2 = prepare(&mut two, &auth, "atm_1");
+        assert_eq!(c1.content_id, c2.content_id);
+        assert_ne!(c1.id, c2.id, "journal checkpoint is provenance");
+        assert_eq!(c1.manifest.tree_oid, c2.manifest.tree_oid);
+        assert_eq!(c1.manifest.patch_digest, c2.manifest.patch_digest);
         let mut three = MemoryRepository::new(expected(), grant());
         three
             .apply_change(
@@ -344,8 +467,9 @@ mod tests {
                 &[PatchHunk::write("src/a.rs", b"different".to_vec())],
             )
             .expect("apply");
-        let c3 = three.prepare_candidate(&auth, &change()).expect("prepare");
+        let c3 = prepare(&mut three, &auth, "atm_1");
         assert_ne!(c1.id, c3.id);
+        assert_ne!(c1.content_id, c3.content_id);
     }
 
     #[test]
@@ -372,8 +496,8 @@ mod tests {
         repo.apply_change(&auth, &[PatchHunk::delete("src/lib.rs")])
             .expect("delete");
         assert!(repo.read_tree(&auth).expect("read").is_empty());
-        let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
-        assert!(candidate.actual_scope.is_empty());
+        let candidate = prepare(&mut repo, &auth, "atm_1");
+        assert!(candidate.manifest.actual_scope.is_empty());
     }
 
     #[test]
@@ -387,13 +511,13 @@ mod tests {
         .expect("apply");
         let checkpoint = repo.checkpoint(&auth).expect("checkpoint");
         assert_eq!(checkpoint.through_seq, 1);
-        let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
+        let candidate = prepare(&mut repo, &auth, "atm_1");
         let proof = bind_proof(&candidate);
         assert_eq!(proof.candidate, candidate.id);
         let (repaired, edge) = MemoryRepository::evolve(&candidate, EvolutionKind::Repair, "r1");
         assert_eq!(edge.kind, EvolutionKind::Repair);
         assert_ne!(repaired.id, candidate.id);
-        assert_eq!(repaired.change, candidate.change);
-        assert_eq!(repaired.parent_candidate_id, Some(candidate.id));
+        assert_eq!(repaired.manifest.change_id, candidate.manifest.change_id);
+        assert_eq!(repaired.manifest.parent_candidate_ids, vec![candidate.id]);
     }
 }

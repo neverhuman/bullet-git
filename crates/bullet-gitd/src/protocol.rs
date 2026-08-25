@@ -1,7 +1,7 @@
 //! Line-delimited JSON protocol: one request object per line, one response
 //! object per line. Documented in `docs/architecture.md`.
 
-use bullet_git_types::{AuthorityEnvelope, PatchProposal};
+use bullet_git_types::{AuthorityEnvelope, CandidateProvenance, Change, PatchProposal};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::BufRead;
@@ -170,10 +170,12 @@ pub struct ApplyProposalParams {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareParams {
-    /// Seed for the stable ChangeId.
-    pub change_seed: String,
-    /// Mission text; its digest becomes the acceptance root.
-    pub mission: String,
+    /// Exact logical Change. Narrative fields are commit inputs, never direct
+    /// Candidate provenance fields.
+    pub change: Change,
+    /// Strict nonlocal provenance. Repository-derived fields are computed by
+    /// BulletGit and cannot be supplied here.
+    pub provenance: CandidateProvenance,
 }
 
 /// `preserve` parameters.

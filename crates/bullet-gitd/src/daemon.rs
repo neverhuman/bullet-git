@@ -7,9 +7,7 @@ use crate::protocol::{
     self, ApplyParams, ApplyProposalParams, CleanupParams, CloneParams, PatchParam, PrepareParams,
     PreserveParams, Request,
 };
-use bullet_git_types::{
-    framed_digest, AuthorityError, Change, ChangeId, Digest, WireAuthorityToken,
-};
+use bullet_git_types::{framed_digest, AuthorityError, Digest, WireAuthorityToken};
 use bullet_git_workspace::{
     AgentRepository, CapabilityError, CloneRequest, CommitIdentity, ExpectedAuthority, PatchHunk,
     PreservationAuthority, PrivateClone, RealRepository, ScopeGrant, MAX_CONTENT_BYTES,
@@ -371,11 +369,12 @@ impl Daemon {
             }
             "prepare_candidate" => {
                 let params: PrepareParams = parse_params(&req.params)?;
-                let change = Change {
-                    id: ChangeId::from_seed(&params.change_seed),
-                    mission: params.mission.clone(),
-                    acceptance_root: Digest::of(params.mission.as_bytes()),
-                };
+                self.session
+                    .as_ref()
+                    .ok_or_else(not_cloned)?
+                    .repo
+                    .validate_candidate_preparation(&envelope, &params.provenance)
+                    .map_err(|error| cap(&error))?;
                 let permit =
                     self.authorize_mutation(req, MutationOperation::PrepareCandidate, &token)?;
                 let pending =
@@ -387,7 +386,7 @@ impl Daemon {
                     .and_then(|session| {
                         let candidate = session
                             .repo
-                            .prepare_candidate(&envelope, &change)
+                            .prepare_candidate(&envelope, &params.change, &params.provenance)
                             .map_err(|e| cap(&e))?;
                         to_value(&candidate)
                     });
@@ -493,5 +492,79 @@ mod tests {
         });
         let error = parse_params::<ApplyProposalParams>(&bad).expect_err("malformed refused");
         assert_eq!(error.0, "BAD_REQUEST");
+    }
+
+    fn valid_prepare_params() -> Value {
+        json!({
+            "change": {
+                "id": format!("chg_{}", "1".repeat(64)),
+                "mission": "exact mission subject",
+                "acceptance_root": "2".repeat(64)
+            },
+            "provenance": {
+                "schema_version": 1,
+                "repository_id": format!("rep_{}", "3".repeat(64)),
+                "producing_attempt_id": format!("atm_{}", "4".repeat(64)),
+                "attempt_fence": 9,
+                "work_package_id": format!("wpk_{}", "5".repeat(64)),
+                "variant_id": format!("var_{}", "6".repeat(64)),
+                "plan_revision_id": format!("pln_{}", "7".repeat(64)),
+                "graph_revision_id": format!("grf_{}", "8".repeat(64)),
+                "base_checkpoint_id": format!("ckp_{}", "9".repeat(64)),
+                "base_commit": format!("sha1:{}", "a".repeat(40)),
+                "parent_candidate_ids": [format!("can_{}", "b".repeat(64))],
+                "granted_scope": ["src"],
+                "context_capsule_id": format!("cnt_{}", "c".repeat(64)),
+                "configuration_snapshot_id": format!("cnt_{}", "d".repeat(64)),
+                "policy_snapshot_id": format!("cnt_{}", "e".repeat(64)),
+                "routing_snapshot_id": format!("cnt_{}", "f".repeat(64)),
+                "environment_digest": "1".repeat(64),
+                "toolchain_digest": "2".repeat(64)
+            }
+        })
+    }
+
+    #[test]
+    fn prepare_candidate_requires_the_complete_strict_provenance_shape() {
+        parse_params::<PrepareParams>(&valid_prepare_params()).expect("strict params");
+
+        let legacy = json!({"change_seed": "demo", "mission": "synthetic"});
+        assert_eq!(
+            parse_params::<PrepareParams>(&legacy)
+                .expect_err("legacy shape refused")
+                .0,
+            "BAD_REQUEST"
+        );
+
+        let valid = valid_prepare_params();
+        let keys = valid["provenance"]
+            .as_object()
+            .expect("provenance object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            let mut missing = valid.clone();
+            missing["provenance"]
+                .as_object_mut()
+                .expect("provenance object")
+                .remove(&key);
+            assert_eq!(
+                parse_params::<PrepareParams>(&missing)
+                    .expect_err("missing provenance refused")
+                    .0,
+                "BAD_REQUEST",
+                "field {key} received a default"
+            );
+        }
+
+        let mut unknown = valid;
+        unknown["provenance"]["model_commentary"] = json!("not authority");
+        assert_eq!(
+            parse_params::<PrepareParams>(&unknown)
+                .expect_err("unknown provenance refused")
+                .0,
+            "BAD_REQUEST"
+        );
     }
 }

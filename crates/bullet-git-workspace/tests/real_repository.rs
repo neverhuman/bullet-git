@@ -4,17 +4,20 @@ mod support;
 
 use bullet_git_journal::Checkpoint;
 use bullet_git_types::{
-    AttemptId, AuthorityEnvelope, Candidate, Change, ChangeId, CheckpointId, ContentId, Digest,
-    GateId, PatchMutation, PatchOperation, PatchProposal, Preimage, RepoPath,
-    PATCH_PROPOSAL_SCHEMA_VERSION,
+    AttemptId, AuthorityEnvelope, Candidate, CandidateProvenance, Change, ChangeId, CheckpointId,
+    ContentId, Digest, GateId, GraphRevisionId, PatchMutation, PatchOperation, PatchProposal,
+    PlanRevisionId, Preimage, RepoPath, RepositoryId, VariantId, WorkPackageId,
+    CANDIDATE_MANIFEST_SCHEMA_VERSION, PATCH_PROPOSAL_SCHEMA_VERSION,
 };
 use bullet_git_workspace::{
     cas_digest, AgentRepository, CommitIdentity, ExpectedAuthority, FileProtocol, ImmutableCas,
     PatchHunk, RealRepository, ScopeGrant, MAX_CAS_OBJECT_BYTES,
 };
 use support::{
-    clone_workspace, envelope, good_auth, init_source, real_repo, ATTEMPT, FENCE, NONCE,
+    clone_workspace, envelope, good_auth, init_source, real_repo, ATTEMPT, FENCE, NONCE, VARIANT,
 };
+
+const ATTEMPT_2: &str = "atm_3333333333333333333333333333333333333333333333333333333333333333";
 
 fn change() -> Change {
     Change {
@@ -54,6 +57,42 @@ fn proposal_write(path: &str, preimage: Preimage, contents: &str) -> PatchOperat
     }
 }
 
+fn candidate_provenance(repo: &RealRepository, attempt: &str) -> CandidateProvenance {
+    CandidateProvenance {
+        schema_version: CANDIDATE_MANIFEST_SCHEMA_VERSION,
+        repository_id: RepositoryId::from_seed("fixture-repository"),
+        producing_attempt_id: AttemptId::parse(attempt).expect("fixture attempt id"),
+        attempt_fence: FENCE,
+        work_package_id: WorkPackageId::from_seed("fixture-package"),
+        variant_id: VariantId::parse(VARIANT).expect("fixture variant id"),
+        plan_revision_id: PlanRevisionId::from_seed("fixture-plan"),
+        graph_revision_id: GraphRevisionId::from_seed("fixture-graph"),
+        base_checkpoint_id: repo.active_checkpoint().id.clone(),
+        base_commit: bullet_git_types::GitOid::new(repo.workspace().base_sha())
+            .expect("fixture base"),
+        parent_candidate_ids: Vec::new(),
+        granted_scope: ["src", "docs"]
+            .into_iter()
+            .map(|path| path.parse::<RepoPath>().expect("fixture grant"))
+            .collect(),
+        context_capsule_id: ContentId::from_seed("fixture-context"),
+        configuration_snapshot_id: ContentId::from_seed("fixture-config"),
+        policy_snapshot_id: ContentId::from_seed("fixture-policy"),
+        routing_snapshot_id: ContentId::from_seed("fixture-route"),
+        environment_digest: Digest::of(b"fixture-environment"),
+        toolchain_digest: Digest::of(b"fixture-toolchain"),
+    }
+}
+
+fn prepare(
+    repo: &mut RealRepository,
+    auth: &AuthorityEnvelope,
+    attempt: &str,
+) -> Result<Candidate, bullet_git_workspace::CapabilityError> {
+    let provenance = candidate_provenance(repo, attempt);
+    repo.prepare_candidate(auth, &change(), &provenance)
+}
+
 fn cas_entries(repo: &RealRepository) -> Vec<String> {
     let mut entries = std::fs::read_dir(repo.workspace().runtime_dir().join("cas"))
         .expect("read CAS")
@@ -76,7 +115,7 @@ fn candidate_for(patches: &[PatchHunk], attempt: &str) -> Candidate {
     let mut repo = real_repo(workspace, attempt);
     let auth = envelope(attempt, FENCE, NONCE);
     repo.apply_change(&auth, patches).expect("apply");
-    repo.prepare_candidate(&auth, &change()).expect("prepare")
+    prepare(&mut repo, &auth, attempt).expect("prepare")
 }
 
 #[test]
@@ -105,17 +144,125 @@ fn full_lifecycle_produces_exact_candidate() {
         )
         .expect("probe");
     assert!(clean_index, "checkpoint staged files in the live index");
-    let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
-    assert_eq!(candidate.base_commit.as_str(), base);
-    assert_ne!(candidate.head_commit, candidate.base_commit);
-    assert!(candidate.tree_hash.as_str().starts_with("sha1:"));
-    assert_eq!(candidate.tree_hash.hex().len(), 40);
-    assert!(candidate.actual_scope.contains(&"src/lib.rs".to_string()));
-    assert_eq!(candidate.attempt_id, ATTEMPT);
+    let candidate = prepare(&mut repo, &auth, ATTEMPT).expect("prepare");
+    assert_eq!(candidate.manifest.base_commit.as_str(), base);
+    assert_ne!(
+        candidate.manifest.head_commit,
+        candidate.manifest.base_commit
+    );
+    assert!(candidate.manifest.tree_oid.as_str().starts_with("sha1:"));
+    assert_eq!(candidate.manifest.tree_oid.hex().len(), 40);
+    assert!(candidate
+        .manifest
+        .actual_scope
+        .iter()
+        .any(|path| path.as_str() == "src/lib.rs"));
+    assert_eq!(candidate.manifest.producing_attempt_id.as_str(), ATTEMPT);
     println!(
         "prepared candidate:\n{}",
         serde_json::to_string_pretty(&candidate).expect("json")
     );
+}
+
+#[test]
+fn candidate_subject_mismatches_refuse_before_generation_or_commit() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let mut repo = real_repo(workspace, ATTEMPT);
+    let auth = good_auth();
+    let valid = candidate_provenance(&repo, ATTEMPT);
+    let before_generation = repo.workspace().generation();
+    let before_checkpoint = repo.active_checkpoint().clone();
+    let before_head = repo
+        .workspace()
+        .git()
+        .run(
+            Some(repo.workspace().repo_dir()),
+            FileProtocol::Never,
+            &["rev-parse", "HEAD"],
+            &[],
+        )
+        .expect("head")
+        .text();
+
+    let mut cases = Vec::new();
+    let mut schema = valid.clone();
+    schema.schema_version += 1;
+    cases.push(("schema_version", schema, "UNSUPPORTED_SCHEMA"));
+    let mut attempt = valid.clone();
+    attempt.producing_attempt_id = AttemptId::from_seed("other-attempt");
+    cases.push((
+        "producing_attempt_id",
+        attempt,
+        "CANDIDATE_SUBJECT_MISMATCH",
+    ));
+    let mut fence = valid.clone();
+    fence.attempt_fence += 1;
+    cases.push(("attempt_fence", fence, "CANDIDATE_SUBJECT_MISMATCH"));
+    let mut variant = valid.clone();
+    variant.variant_id = VariantId::from_seed("other-variant");
+    cases.push(("variant_id", variant, "CANDIDATE_SUBJECT_MISMATCH"));
+    let mut checkpoint = valid.clone();
+    checkpoint.base_checkpoint_id = CheckpointId::from_seed("stale-checkpoint");
+    cases.push((
+        "base_checkpoint_id",
+        checkpoint,
+        "CANDIDATE_SUBJECT_MISMATCH",
+    ));
+    let mut base_commit = valid.clone();
+    base_commit.base_commit =
+        bullet_git_types::GitOid::new(format!("sha1:{}", "0".repeat(40))).expect("oid");
+    cases.push(("base_commit", base_commit, "CANDIDATE_SUBJECT_MISMATCH"));
+    let mut grant = valid.clone();
+    grant.granted_scope = vec!["src/narrow".parse::<RepoPath>().expect("grant")];
+    cases.push(("granted_scope", grant, "CANDIDATE_SUBJECT_MISMATCH"));
+
+    for (field, provenance, reason) in cases {
+        let error = repo
+            .prepare_candidate(&auth, &change(), &provenance)
+            .expect_err("subject mismatch refused");
+        assert_eq!(error.reason_code(), reason, "field {field}");
+        assert_eq!(
+            repo.workspace().generation(),
+            before_generation,
+            "field {field}"
+        );
+        assert_eq!(
+            repo.active_checkpoint(),
+            &before_checkpoint,
+            "field {field}"
+        );
+        let after_head = repo
+            .workspace()
+            .git()
+            .run(
+                Some(repo.workspace().repo_dir()),
+                FileProtocol::Never,
+                &["rev-parse", "HEAD"],
+                &[],
+            )
+            .expect("head")
+            .text();
+        assert_eq!(after_head, before_head, "field {field} created a commit");
+    }
+
+    let hostile_variant = VariantId::from_seed("authority-variant");
+    let authority = AuthorityEnvelope {
+        token: serde_json::to_vec(&serde_json::json!({
+            "variant_id": hostile_variant,
+            "attempt_id": ATTEMPT,
+            "attempt_fence": FENCE,
+            "workspace_nonce": NONCE,
+        }))
+        .expect("authority"),
+    };
+    let error = repo
+        .prepare_candidate(&authority, &change(), &valid)
+        .expect_err("authority variant refused");
+    assert_eq!(error.reason_code(), "CANDIDATE_SUBJECT_MISMATCH");
+    assert_eq!(repo.workspace().generation(), before_generation);
+    assert_eq!(repo.active_checkpoint(), &before_checkpoint);
 }
 
 #[test]
@@ -433,25 +580,30 @@ fn oversized_preimage_is_refused_before_tree_or_journal_mutation() {
 }
 
 #[test]
-fn same_tree_means_same_tree_sha_and_order_does_not_matter() {
+fn same_content_is_reusable_across_distinct_attempt_candidates() {
     let a = patch("src/a.rs", "pub fn a() {}\n");
     let b = patch("src/b.rs", "pub fn b() {}\n");
     let one = candidate_for(&[a.clone(), b.clone()], ATTEMPT);
-    let two = candidate_for(&[b, a], "atm_fixture02");
-    assert_eq!(one.tree_hash, two.tree_hash, "same tree, same tree_sha");
+    let two = candidate_for(&[b, a], ATTEMPT_2);
     assert_eq!(
-        one.patch_hash, two.patch_hash,
+        one.manifest.tree_oid, two.manifest.tree_oid,
+        "same tree, same tree OID"
+    );
+    assert_eq!(
+        one.manifest.patch_digest, two.manifest.patch_digest,
         "order must not change digests"
     );
-    assert_eq!(one.id, two.id, "content-derived id is order independent");
+    assert_eq!(one.content_id, two.content_id, "content remains reusable");
+    assert_ne!(one.id, two.id, "producing Attempt is Candidate provenance");
 }
 
 #[test]
 fn different_contents_under_one_change_have_different_candidate_ids() {
     let one = candidate_for(&[patch("src/a.rs", "pub fn a() {}\n")], ATTEMPT);
-    let two = candidate_for(&[patch("src/a.rs", "pub fn b() {}\n")], "atm_fixture02");
-    assert_eq!(one.change, two.change);
-    assert_ne!(one.tree_hash, two.tree_hash);
+    let two = candidate_for(&[patch("src/a.rs", "pub fn b() {}\n")], ATTEMPT);
+    assert_eq!(one.manifest.change_id, two.manifest.change_id);
+    assert_ne!(one.manifest.tree_oid, two.manifest.tree_oid);
+    assert_ne!(one.content_id, two.content_id);
     assert_ne!(one.id, two.id, "two different trees must never share an id");
 }
 
@@ -551,8 +703,8 @@ fn hostile_hooks_and_home_config_never_execute() {
     let auth = good_auth();
     repo.apply_change(&auth, &[patch("src/lib.rs", "pub fn h() {}\n")])
         .expect("apply");
-    let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
-    assert_eq!(candidate.base_commit.as_str(), base);
+    let candidate = prepare(&mut repo, &auth, ATTEMPT).expect("prepare");
+    assert_eq!(candidate.manifest.base_commit.as_str(), base);
     assert!(!canary.exists(), "a hostile hook executed");
 }
 
@@ -617,8 +769,12 @@ fn delete_of_tracked_file_lands_in_candidate_and_journal() {
     assert_eq!(op.kind, JournalOpKind::Delete);
     assert_eq!(op.before, Some(cas_digest(&before)), "before-state object");
     assert_eq!(op.after, None);
-    let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
-    assert!(candidate.actual_scope.contains(&"src/lib.rs".to_string()));
+    let candidate = prepare(&mut repo, &auth, ATTEMPT).expect("prepare");
+    assert!(candidate
+        .manifest
+        .actual_scope
+        .iter()
+        .any(|path| path.as_str() == "src/lib.rs"));
     let listed = repo
         .workspace()
         .git()
@@ -696,9 +852,7 @@ fn sequencer_state_blocks_checkpoint_and_prepare() {
     let auth = good_auth();
     let err = repo.checkpoint(&auth).expect_err("refused");
     assert_eq!(err.reason_code(), "SEQUENCER_ACTIVE");
-    let err = repo
-        .prepare_candidate(&auth, &change())
-        .expect_err("refused");
+    let err = prepare(&mut repo, &auth, ATTEMPT).expect_err("refused");
     assert_eq!(err.reason_code(), "SEQUENCER_ACTIVE");
 }
 
@@ -710,9 +864,7 @@ fn unclassified_untracked_file_outside_scope_blocks_prepare() {
     let mut repo = real_repo(workspace, ATTEMPT);
     std::fs::write(repo.workspace().repo_dir().join("stray.bin"), b"noise").expect("stray");
     let auth = good_auth();
-    let err = repo
-        .prepare_candidate(&auth, &change())
-        .expect_err("refused");
+    let err = prepare(&mut repo, &auth, ATTEMPT).expect_err("refused");
     assert_eq!(err.reason_code(), "UNCLASSIFIED_UNTRACKED");
     assert!(err.to_string().contains("stray.bin"));
 }

@@ -7,9 +7,13 @@ mod proposal;
 pub mod schema_bundle;
 
 pub use authority::{AuthorityEnvelope, AuthorityError, WireAuthorityToken};
-pub use change::{Candidate, Change, EvolutionEdge, EvolutionKind, ProofRoot};
+pub use change::{
+    Candidate, CandidateManifest, CandidateManifestError, CandidateProvenance, Change,
+    EvolutionEdge, EvolutionKind, ProofRoot, CANDIDATE_MANIFEST_SCHEMA_VERSION,
+};
 pub use ids::{
     AttemptId, CandidateId, ChangeId, CheckpointId, ContentId, GateId, GitOid, GitOidAlgorithm,
+    GraphRevisionId, PlanRevisionId, RepositoryId, VariantId, WorkPackageId,
 };
 pub use proposal::{
     PatchMutation, PatchOperation, PatchProposal, Preimage, ProposalError, RepoPath,
@@ -50,6 +54,12 @@ impl TypesError {
 pub struct Digest(#[serde(with = "hex_bytes")] [u8; 32]);
 
 impl Digest {
+    /// Construct a digest from exact BLAKE3 bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Hash bytes with BLAKE3.
     #[must_use]
     pub fn of(bytes: &[u8]) -> Self {

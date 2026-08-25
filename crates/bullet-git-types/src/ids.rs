@@ -1,6 +1,6 @@
 //! Typed identifiers. Display names, paths, and PIDs are never identifiers.
 
-use crate::{framed_digest, Digest, TypesError};
+use crate::{Digest, TypesError};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
@@ -75,21 +75,25 @@ typed_id!(CheckpointId, "ckp");
 typed_id!(AttemptId, "atm");
 typed_id!(ContentId, "cnt");
 typed_id!(GateId, "gat");
+typed_id!(RepositoryId, "rep");
+typed_id!(WorkPackageId, "wpk");
+typed_id!(VariantId, "var");
+typed_id!(PlanRevisionId, "pln");
+typed_id!(GraphRevisionId, "grf");
 
 impl CandidateId {
-    /// Content-derived identity: the exact change, tree, and head commit.
-    ///
-    /// Two different trees under one Change always produce different ids;
-    /// identical content produces the identical id.
+    /// Provenance-bound identity from the canonical Candidate manifest digest.
     #[must_use]
-    pub fn from_content(change: &ChangeId, tree: &GitOid, head: &GitOid) -> Self {
-        let digest = framed_digest(&[
-            b"candidate.v1",
-            change.as_str().as_bytes(),
-            tree.as_str().as_bytes(),
-            head.as_str().as_bytes(),
-        ]);
+    pub fn from_digest(digest: Digest) -> Self {
         Self(format!("can_{}", digest.to_hex()))
+    }
+}
+
+impl ContentId {
+    /// Reusable content identity from a canonical content-manifest digest.
+    #[must_use]
+    pub fn from_digest(digest: Digest) -> Self {
+        Self(format!("cnt_{}", digest.to_hex()))
     }
 }
 
@@ -308,16 +312,13 @@ mod tests {
     }
 
     #[test]
-    fn candidate_id_is_content_derived() {
-        let change = ChangeId::from_seed("c");
-        let tree_a = GitOid::from_hex(GitOidAlgorithm::Sha1, "a".repeat(40)).expect("oid");
-        let tree_b = GitOid::from_hex(GitOidAlgorithm::Sha1, "b".repeat(40)).expect("oid");
-        let head = GitOid::from_hex(GitOidAlgorithm::Sha1, "c".repeat(40)).expect("oid");
-        let one = CandidateId::from_content(&change, &tree_a, &head);
-        let two = CandidateId::from_content(&change, &tree_b, &head);
-        assert_ne!(one, two);
-        assert_eq!(one, CandidateId::from_content(&change, &tree_a, &head));
-        assert!(CandidateId::parse(one.as_str()).is_ok());
-        assert_eq!(one.as_str().len(), "can_".len() + 64);
+    fn candidate_and_content_ids_are_distinct_digest_addresses() {
+        let digest = Digest::of(b"same digest bytes");
+        let candidate = CandidateId::from_digest(digest);
+        let content = ContentId::from_digest(digest);
+        assert_eq!(&candidate.as_str()[4..], &content.as_str()[4..]);
+        assert_ne!(candidate.as_str(), content.as_str());
+        assert!(CandidateId::parse(candidate.as_str()).is_ok());
+        assert!(ContentId::parse(content.as_str()).is_ok());
     }
 }

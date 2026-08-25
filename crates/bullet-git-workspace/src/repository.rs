@@ -10,8 +10,8 @@ use crate::status::{parse_status_line, StatusEntry};
 use crate::CapabilityError;
 use bullet_git_journal::{Checkpoint, DurableJournal, JournalMutation};
 use bullet_git_types::{
-    AuthorityEnvelope, Candidate, CandidateId, Change, Digest, GitOid, PatchMutation,
-    PatchProposal, Preimage, WireAuthorityToken,
+    AuthorityEnvelope, Candidate, CandidateProvenance, Change, Digest, GitOid, PatchMutation,
+    PatchProposal, Preimage, RepoPath, WireAuthorityToken,
 };
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -66,6 +66,20 @@ pub trait AgentRepository {
     /// Returns authority, sequencer, or git errors.
     fn checkpoint(&mut self, auth: &AuthorityEnvelope) -> Result<Checkpoint, CapabilityError>;
 
+    /// Read-only refusal check for Candidate preparation. Daemon dispatch
+    /// calls this before consuming a one-use mutation permit; the writer calls
+    /// it again at its final boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns authority, provenance, workspace, scope, checkpoint, or Git
+    /// refusals without publishing a generation or controlled commit.
+    fn validate_candidate_preparation(
+        &self,
+        auth: &AuthorityEnvelope,
+        provenance: &CandidateProvenance,
+    ) -> Result<(), CapabilityError>;
+
     /// Prepare an exact Candidate from a fresh workspace scan.
     ///
     /// # Errors
@@ -75,6 +89,7 @@ pub trait AgentRepository {
         &mut self,
         auth: &AuthorityEnvelope,
         change: &Change,
+        provenance: &CandidateProvenance,
     ) -> Result<Candidate, CapabilityError>;
 }
 
@@ -272,6 +287,62 @@ impl RealRepository {
                 found: proposal.producing_attempt_id.to_string(),
             })
         }
+    }
+
+    fn require_candidate_provenance(
+        &self,
+        token: &WireAuthorityToken,
+        provenance: &CandidateProvenance,
+        active_checkpoint: &Checkpoint,
+        base_commit: &GitOid,
+    ) -> Result<(), CapabilityError> {
+        provenance.validate()?;
+        require_candidate_field(
+            "producing_attempt_id",
+            &self.expected.attempt_id,
+            provenance.producing_attempt_id.as_str(),
+        )?;
+        require_candidate_field(
+            "attempt_fence",
+            &self.expected.attempt_fence.to_string(),
+            &provenance.attempt_fence.to_string(),
+        )?;
+        require_candidate_field(
+            "variant_id",
+            &self.workspace.manifest().variant_id,
+            provenance.variant_id.as_str(),
+        )?;
+        require_candidate_field(
+            "authority_variant_id",
+            &token.variant_id,
+            provenance.variant_id.as_str(),
+        )?;
+        require_candidate_field(
+            "base_checkpoint_id",
+            active_checkpoint.id.as_str(),
+            provenance.base_checkpoint_id.as_str(),
+        )?;
+        require_candidate_field(
+            "base_commit",
+            base_commit.as_str(),
+            provenance.base_commit.as_str(),
+        )?;
+        let local_grant = self
+            .grant
+            .allowed_prefixes
+            .iter()
+            .map(|path| path.parse::<RepoPath>())
+            .collect::<Result<Vec<_>, _>>()?;
+        if provenance.granted_scope != local_grant {
+            return Err(CapabilityError::CandidateSubjectMismatch {
+                field: "granted_scope",
+                expected: serde_json::to_string(&local_grant)
+                    .unwrap_or_else(|_| "<unencodable>".into()),
+                found: serde_json::to_string(&provenance.granted_scope)
+                    .unwrap_or_else(|_| "<unencodable>".into()),
+            });
+        }
+        Ok(())
     }
 
     fn require_proposal_checkpoint(
@@ -658,6 +729,22 @@ mod proposal_preimage_tests {
         let error =
             read_proposal_file_nofollow(&repo, "src/secret").expect_err("parent symlink refused");
         assert_eq!(error.reason_code(), "STALE_PREIMAGE");
+    }
+}
+
+fn require_candidate_field(
+    field: &'static str,
+    expected: &str,
+    found: &str,
+) -> Result<(), CapabilityError> {
+    if expected == found {
+        Ok(())
+    } else {
+        Err(CapabilityError::CandidateSubjectMismatch {
+            field,
+            expected: expected.to_owned(),
+            found: found.to_owned(),
+        })
     }
 }
 
