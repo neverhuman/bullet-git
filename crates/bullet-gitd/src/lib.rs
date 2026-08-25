@@ -9,7 +9,7 @@ pub mod protocol;
 use bullet_git_journal::{Checkpoint, Journal};
 use bullet_git_types::{
     frame, framed_digest, AuthorityEnvelope, Candidate, CandidateId, Change, Digest, EvolutionEdge,
-    EvolutionKind, GitOid, ProofRoot,
+    EvolutionKind, GitOid, GitOidAlgorithm, ProofRoot,
 };
 use bullet_git_workspace::{
     validate_batch, AgentRepository, CapabilityError, ExpectedAuthority, PatchHunk, PatchOp,
@@ -18,7 +18,7 @@ use bullet_git_workspace::{
 
 fn synth_oid(fields: &[&[u8]]) -> GitOid {
     let hex = framed_digest(fields).to_hex();
-    GitOid::new(&hex[..40]).expect("40 hex chars from a 64-char digest")
+    GitOid::from_hex(GitOidAlgorithm::Sha256, hex).expect("BLAKE3 is 64 lowercase hex")
 }
 
 /// In-process fake enforcing the same authority and scope rules as

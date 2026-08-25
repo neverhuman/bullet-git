@@ -34,13 +34,14 @@ pub struct CloneRequest<'a> {
 
 /// Manifest recorded outside the repository tree at creation time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceManifest {
     /// Attempt incarnation.
     pub attempt_id: String,
     /// Variant that owns the writer lease.
     pub variant_id: String,
     /// Exact base commit.
-    pub base_sha: String,
+    pub base_sha: GitOid,
     /// Private branch `bullet/<variant_id>/<attempt_id>`.
     pub branch: String,
     /// RFC 3339 creation timestamp from the caller's clock.
@@ -86,7 +87,7 @@ impl PrivateClone {
         prepare_private_directory(&runtime_dir)?;
         let git = SafeGit::new(&runtime_dir)?;
         let mirror = sync_mirror(&git, req.root, req.source_repo)?;
-        let commitish = format!("{base}^{{commit}}");
+        let commitish = format!("{}^{{commit}}", base.hex());
         let base_exists = git.probe(
             Some(&mirror.dir),
             &["rev-parse", "--verify", "--quiet", &commitish],
@@ -123,13 +124,15 @@ impl PrivateClone {
                 &[],
             )?
             .text();
-        let initial_checkpoint = journal.checkpoint().bind_git_tree(GitOid::new(base_tree)?);
+        let initial_checkpoint = journal
+            .checkpoint()
+            .bind_git_tree(GitOid::from_hex(base.algorithm(), base_tree)?);
         let nonce_hex = hex::encode(req.nonce);
         let generations = bootstrap.finish(req.attempt_id, &nonce_hex, initial_checkpoint)?;
         let manifest = WorkspaceManifest {
             attempt_id: req.attempt_id.to_string(),
             variant_id: req.variant_id.to_string(),
-            base_sha: base.as_str().to_string(),
+            base_sha: base,
             branch,
             created_at: req.created_at.to_string(),
             nonce_hex,
@@ -192,7 +195,11 @@ impl PrivateClone {
     /// The exact base commit.
     #[must_use]
     pub fn base_sha(&self) -> &str {
-        &self.manifest.base_sha
+        self.manifest.base_sha.as_str()
+    }
+
+    pub(crate) fn git_oid(&self, hex: impl Into<String>) -> Result<GitOid, CapabilityError> {
+        Ok(GitOid::from_hex(self.manifest.base_sha.algorithm(), hex)?)
     }
 
     /// The recorded manifest.
@@ -366,7 +373,7 @@ fn checkout_private_branch(
     git.run(
         Some(repo_dir),
         FileProtocol::Never,
-        &["checkout", "--detach", base.as_str()],
+        &["checkout", "--detach", base.hex()],
         &[],
     )?;
     match git.head_state(repo_dir)? {

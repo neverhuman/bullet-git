@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use support::{clone_workspace, fixture_git, init_source};
+use support::{clone_workspace, fixture_git, init_source, sha1_oid};
 
 fn lock_file_for(mirror: &Path) -> PathBuf {
     let name = mirror.file_name().expect("mirror name").to_string_lossy();
@@ -62,7 +62,7 @@ fn second_clone_fetches_new_commits_under_the_lock() {
             "two",
         ],
     );
-    let base_two = fixture_git(&home, &["-C", &src_str, "rev-parse", "HEAD"]);
+    let base_two = sha1_oid(&fixture_git(&home, &["-C", &src_str, "rev-parse", "HEAD"]));
     assert_ne!(base_one, base_two);
     let second = clone_workspace(tmp.path(), &src, &base_two, "atm_mirror03");
     assert_eq!(second.base_sha(), base_two);

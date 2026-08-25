@@ -7,7 +7,7 @@ pub mod schema_bundle;
 
 pub use authority::{AuthorityEnvelope, AuthorityError, WireAuthorityToken};
 pub use change::{Candidate, Change, EvolutionEdge, EvolutionKind, ProofRoot};
-pub use ids::{CandidateId, ChangeId, CheckpointId, GitOid};
+pub use ids::{CandidateId, ChangeId, CheckpointId, GitOid, GitOidAlgorithm};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -15,10 +15,10 @@ use thiserror::Error;
 /// Typed identity/encoding error with stable reason codes.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TypesError {
-    /// An identifier was missing its prefix or 32-hex body.
+    /// An identifier was missing its prefix or full 64-hex body.
     #[error("invalid id: {0}")]
     InvalidId(String),
-    /// A Git object id was not 40 lowercase hex characters.
+    /// A Git object id was not a supported algorithm-tagged lowercase value.
     #[error("invalid git oid: {0}")]
     InvalidOid(String),
     /// A hex digest failed to decode into 32 bytes.

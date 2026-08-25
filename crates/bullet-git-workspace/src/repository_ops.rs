@@ -73,7 +73,7 @@ impl AgentRepository for RealRepository {
         self.publish_stage(stage, checkpoint)?;
 
         let base = GitOid::new(self.workspace.base_sha())?;
-        let range = format!("{base}..{head}");
+        let range = format!("{}..{}", base.hex(), head.hex());
         let patch = self.workspace.git().run(
             Some(self.workspace.repo_dir()),
             FileProtocol::Never,

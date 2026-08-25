@@ -133,15 +133,16 @@ impl ProofRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GitOidAlgorithm;
 
     fn candidate(tree: &str, head: &str) -> Candidate {
         let change = ChangeId::from_seed("c");
-        let tree = GitOid::new(tree.repeat(40)).expect("oid");
-        let head = GitOid::new(head.repeat(40)).expect("oid");
+        let tree = GitOid::from_hex(GitOidAlgorithm::Sha1, tree.repeat(40)).expect("oid");
+        let head = GitOid::from_hex(GitOidAlgorithm::Sha1, head.repeat(40)).expect("oid");
         Candidate {
             id: CandidateId::from_content(&change, &tree, &head),
             change,
-            base_commit: GitOid::new("0".repeat(40)).expect("oid"),
+            base_commit: GitOid::from_hex(GitOidAlgorithm::Sha1, "0".repeat(40)).expect("oid"),
             head_commit: head.clone(),
             tree_hash: tree,
             patch_hash: Digest::of(head.as_str().as_bytes()),

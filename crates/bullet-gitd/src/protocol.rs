@@ -118,7 +118,7 @@ pub fn err_line(id: &Value, code: &str, message: &str) -> String {
 pub struct CloneParams {
     /// Source repository path (the mirror).
     pub source_repo: String,
-    /// Exact base commit (40 hex).
+    /// Exact algorithm-tagged base commit.
     pub base_sha: String,
     /// Root under which `work/` and `runtime/` live.
     pub root: String,

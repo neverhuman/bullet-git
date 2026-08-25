@@ -75,7 +75,7 @@ fn self_authored_token_cannot_create_a_workspace() {
         "token": token(),
         "params": {
             "source_repo": "/does/not/matter",
-            "base_sha": "a".repeat(40),
+            "base_sha": format!("sha1:{}", "a".repeat(40)),
             "root": root,
             "created_at": "2026-08-24T00:00:00Z",
             "allowed_prefixes": ["src"],

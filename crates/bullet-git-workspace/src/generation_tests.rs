@@ -3,7 +3,7 @@ use crate::generation::{
     GenerationBootstrap, GenerationBoundary, GenerationFaults, GenerationStore,
 };
 use bullet_git_journal::DurableJournal;
-use bullet_git_types::GitOid;
+use bullet_git_types::{GitOid, GitOidAlgorithm};
 use std::fs;
 
 const ATTEMPT: &str = "attempt_generation_test";
@@ -18,7 +18,7 @@ impl GenerationFaults for Trip {
 }
 
 fn tree(digit: u8) -> GitOid {
-    GitOid::new(format!("{digit:040x}")).expect("oid")
+    GitOid::from_hex(GitOidAlgorithm::Sha1, format!("{digit:040x}")).expect("oid")
 }
 
 fn store() -> (tempfile::TempDir, GenerationStore) {

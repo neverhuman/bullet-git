@@ -47,7 +47,8 @@ fn full_lifecycle_produces_exact_candidate() {
     let checkpoint = repo.checkpoint(&auth).expect("checkpoint");
     assert!(checkpoint.identity_is_valid());
     let git_tree = checkpoint.git_tree.expect("git tree");
-    assert_eq!(git_tree.as_str().len(), 40);
+    assert!(git_tree.as_str().starts_with("sha1:"));
+    assert_eq!(git_tree.hex().len(), 40);
     // R7: the checkpoint must not stage anything in the live index.
     let clean_index = repo
         .workspace()
@@ -61,7 +62,8 @@ fn full_lifecycle_produces_exact_candidate() {
     let candidate = repo.prepare_candidate(&auth, &change()).expect("prepare");
     assert_eq!(candidate.base_commit.as_str(), base);
     assert_ne!(candidate.head_commit, candidate.base_commit);
-    assert_eq!(candidate.tree_hash.as_str().len(), 40);
+    assert!(candidate.tree_hash.as_str().starts_with("sha1:"));
+    assert_eq!(candidate.tree_hash.hex().len(), 40);
     assert!(candidate.actual_scope.contains(&"src/lib.rs".to_string()));
     assert_eq!(candidate.attempt_id, ATTEMPT);
     println!(

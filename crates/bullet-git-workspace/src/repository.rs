@@ -334,7 +334,9 @@ impl RealRepository {
             let tree = git
                 .run(Some(repo), FileProtocol::Never, &["write-tree"], &env)?
                 .text();
-            Ok(journal.checkpoint().bind_git_tree(GitOid::new(tree)?))
+            Ok(journal
+                .checkpoint()
+                .bind_git_tree(self.workspace.git_oid(tree)?))
         })();
         let _ = fs::remove_file(&index_path);
         result
@@ -366,7 +368,7 @@ impl RealRepository {
                 &[],
             )?
             .text();
-        Ok((GitOid::new(head)?, GitOid::new(tree)?))
+        Ok((self.workspace.git_oid(head)?, self.workspace.git_oid(tree)?))
     }
 
     fn require_private_branch(&self) -> Result<(), CapabilityError> {

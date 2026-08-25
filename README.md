@@ -3,9 +3,9 @@
 Agent-first repository kernel for Bullet Farm. Agents start at [`AGENTS.md`](AGENTS.md).
 
 ```text
-ChangeId     stable engineering intention
-CandidateId  exact immutable implementation (content-derived)
-GitOid       exported ordinary Git commit
+ChangeId     stable engineering intention (chg_ + 64 lowercase hex)
+CandidateId  exact immutable implementation (can_ + 64 lowercase hex)
+GitOid       ordinary Git object (sha1:<40> or sha256:<64> lowercase hex)
 ```
 
 This crate family owns the change graph. `bullet-gitd` (this repo) is the

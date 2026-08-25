@@ -18,10 +18,16 @@ that boundary everything is ordinary blobs, trees, commits, and refs.
 
 | Crate | Role |
 |---|---|
-| `bullet-git-types` | ChangeId/CandidateId/CheckpointId, validated `GitOid` (40 lowercase hex), `Candidate` (spec §6.13 minus `toolchain_digest`; `lineage_subject` and `environment_digest` are optional and outside `CandidateId`/`ProofRoot`), `ProofRoot`, framed digests, `WireAuthorityToken` |
+| `bullet-git-types` | full 256-bit lowercase ChangeId/CandidateId/CheckpointId, validated algorithm-tagged `GitOid` (`sha1:<40 lowercase hex>` or `sha256:<64 lowercase hex>`), `Candidate` (spec §6.13 minus `toolchain_digest`; `lineage_subject` and `environment_digest` are optional and outside `CandidateId`/`ProofRoot`), `ProofRoot`, framed digests, `WireAuthorityToken` |
 | `bullet-git-journal` | append-only workspace journal and checkpoints |
 | `bullet-git-workspace` | `SafeGit` hardened command builder and local-config admission, mirror-under-lock source fetch, `PrivateClone` lifecycle (§20.2), `ScopeGrant`, `RealRepository` capability API over real Git |
 | `bullet-gitd` | the stdio daemon binary plus `MemoryRepository`, an in-process fake with the same authority and scope rules |
+
+Identity compatibility is intentionally absent before 1.0. Legacy 32-hex
+Change/Checkpoint/Candidate IDs, untagged Git OIDs, uppercase hex, unknown
+algorithms, and wrong widths fail decoding; no stored subject is upgraded or
+silently reinterpreted. Exact serde goldens pin all three typed-ID prefixes and
+both supported Git OID algorithms.
 
 ## Workspace layout (spec §20.1)
 
@@ -35,7 +41,7 @@ that boundary everything is ordinary blobs, trees, commits, and refs.
 branch                             bullet/<variant_id>/<attempt_id>
 ```
 
-The `WorkspaceManifest` (attempt and variant ids, base sha, branch,
+The `WorkspaceManifest` (attempt and variant ids, algorithm-tagged base OID, branch,
 created_at from the caller's clock, 32-byte nonce hex, repo, source and
 mirror paths) is recorded in the runtime dir, never inside the repository
 tree.
@@ -170,7 +176,8 @@ tree.
   scan classifies every entry; unclassified untracked files outside scope
   refuse preparation. The commit uses the fixed identity
   `Bullet Farm <farm@bullet.local>` and a caller-fixed date on the private
-  branch. The result carries exact `base_commit`/`head_commit`/`tree_hash`
+  branch. The result carries exact algorithm-tagged
+  `base_commit`/`head_commit`/`tree_hash`
   (`git rev-parse HEAD^{tree}`) and `patch_hash` = BLAKE3 of the
   `git diff base..head` bytes. `CandidateId` is content-derived from
   change + tree + head, so two different trees under one Change can never
@@ -222,18 +229,18 @@ cannot create that session until the immutable authority consumer lands.
 
 | Method | Params | Result |
 |---|---|---|
-| `clone` | `source_repo`, `base_sha`, `root`, `created_at`, `allowed_prefixes`, `commit_date` (variant/attempt/nonce come from the token) | `repo_dir`, `runtime_dir`, `branch`, `base_sha` |
+| `clone` | `source_repo`, algorithm-tagged `base_sha`, `root`, `created_at`, `allowed_prefixes`, `commit_date` (variant/attempt/nonce come from the token) | `repo_dir`, `runtime_dir`, `branch`, tagged `base_sha` |
 | `read_tree` | — | `files`: tracked paths |
 | `apply_change` | `patches`: `[{path, op?, contents_hex?}]` — `op` is `write` (default; full-file `contents_hex` required, hex) or `delete` (must omit `contents_hex`) | `applied`: count |
 | `checkpoint` | — | Checkpoint JSON incl. `git_tree` |
-| `prepare_candidate` | `change_seed`, `mission` | Candidate JSON (exact SHAs, `patch_hash`; `lineage_subject`/`environment_digest` are `null` until a producer populates them) |
+| `prepare_candidate` | `change_seed`, `mission` | Candidate JSON (exact algorithm-tagged Git OIDs, `patch_hash`; `lineage_subject`/`environment_digest` are `null` until a producer populates them) |
 | `preserve` | `destination` (new absolute canonical external directory) | opaque `preservation_receipt`, receipt/artifact digests, canonical destination |
 | `cleanup` | `preservation_receipt`, `deleted_at` | `tombstone`, receipt digest, `verified` |
 
 Current production conversation:
 
 ```text
-→ {"id":1,"method":"clone","token":{...},"params":{"source_repo":"/mirrors/repo.git","base_sha":"d6d3…","root":"/farm","created_at":"2026-08-24T00:00:00Z","allowed_prefixes":["src"],"commit_date":"2026-08-24T00:00:00+00:00"}}
+→ {"id":1,"method":"clone","token":{...},"params":{"source_repo":"/mirrors/repo.git","base_sha":"sha1:d6d3b35c8e418f44db2264c04548dafd009a934a","root":"/farm","created_at":"2026-08-24T00:00:00Z","allowed_prefixes":["src"],"commit_date":"2026-08-24T00:00:00+00:00"}}
 ← {"id":1,"err":{"code":"AUTHORITY_CONTRACT_UNAVAILABLE","message":"…"}}
 → {"id":2,"method":"apply_change","token":{...},"params":{"patches":[]}}
 ← {"id":2,"err":{"code":"NOT_CLONED","message":"clone must be the first call"}}

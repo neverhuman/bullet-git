@@ -4,6 +4,8 @@ use crate::{framed_digest, Digest, TypesError};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
+const ID_HEX_LEN: usize = 64;
+
 macro_rules! typed_id {
     ($name:ident, $prefix:literal) => {
         #[doc = concat!("Typed `", $prefix, "` identifier.")]
@@ -16,7 +18,7 @@ macro_rules! typed_id {
             #[must_use]
             pub fn from_seed(seed: &str) -> Self {
                 let digest = Digest::of(format!("{}:{}", $prefix, seed).as_bytes());
-                Self(format!("{}_{}", $prefix, &digest.to_hex()[..32]))
+                Self(format!("{}_{}", $prefix, digest.to_hex()))
             }
 
             /// Parse a prefixed hex id.
@@ -28,11 +30,11 @@ macro_rules! typed_id {
             pub fn parse(raw: impl AsRef<str>) -> Result<Self, TypesError> {
                 let raw = raw.as_ref();
                 let expected = concat!($prefix, "_");
-                if !raw.starts_with(expected) || raw.len() != expected.len() + 32 {
+                if !raw.starts_with(expected) || raw.len() != expected.len() + ID_HEX_LEN {
                     return Err(TypesError::InvalidId(raw.to_string()));
                 }
                 let body = &raw[expected.len()..];
-                if !body.chars().all(|c| c.is_ascii_hexdigit()) {
+                if !is_lower_hex(body, ID_HEX_LEN) {
                     return Err(TypesError::InvalidId(raw.to_string()));
                 }
                 Ok(Self(raw.to_string()))
@@ -84,39 +86,105 @@ impl CandidateId {
             tree.as_str().as_bytes(),
             head.as_str().as_bytes(),
         ]);
-        Self(format!("can_{}", &digest.to_hex()[..32]))
+        Self(format!("can_{}", digest.to_hex()))
     }
 }
 
-/// Exported ordinary Git object id: exactly 40 lowercase hex characters.
+/// Git object hashing algorithm carried by a canonical [`GitOid`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GitOidAlgorithm {
+    /// SHA-1 object format.
+    Sha1,
+    /// SHA-256 object format.
+    Sha256,
+}
+
+impl GitOidAlgorithm {
+    /// Canonical wire tag.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sha1 => "sha1",
+            Self::Sha256 => "sha256",
+        }
+    }
+
+    const fn hex_len(self) -> usize {
+        match self {
+            Self::Sha1 => 40,
+            Self::Sha256 => 64,
+        }
+    }
+}
+
+/// Exported ordinary Git object id with an explicit hashing algorithm.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct GitOid(String);
 
 impl GitOid {
-    /// Validate and wrap a 40-hex object id.
+    /// Validate `sha1:<40 lowercase hex>` or `sha256:<64 lowercase hex>`.
     ///
     /// # Errors
     ///
-    /// Returns `TypesError::InvalidOid` unless the input is exactly 40
-    /// lowercase hex characters.
+    /// Returns `TypesError::InvalidOid` unless the input is canonical and
+    /// algorithm-tagged.
     pub fn new(raw: impl Into<String>) -> Result<Self, TypesError> {
         let raw = raw.into();
-        let valid = raw.len() == 40
-            && raw
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
-        if valid {
-            Ok(Self(raw))
-        } else {
-            Err(TypesError::InvalidOid(raw))
+        let Some((tag, hex)) = raw.split_once(':') else {
+            return Err(TypesError::InvalidOid(raw));
+        };
+        let algorithm = match tag {
+            "sha1" => GitOidAlgorithm::Sha1,
+            "sha256" => GitOidAlgorithm::Sha256,
+            _ => return Err(TypesError::InvalidOid(raw)),
+        };
+        if !is_lower_hex(hex, algorithm.hex_len()) {
+            return Err(TypesError::InvalidOid(raw));
         }
+        Ok(Self(raw))
     }
 
-    /// Borrow the hex string.
+    /// Tag validated native Git output with its repository algorithm.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TypesError::InvalidOid` when `hex` is not the algorithm's
+    /// exact lowercase width.
+    pub fn from_hex(
+        algorithm: GitOidAlgorithm,
+        hex: impl Into<String>,
+    ) -> Result<Self, TypesError> {
+        let hex = hex.into();
+        if !is_lower_hex(&hex, algorithm.hex_len()) {
+            return Err(TypesError::InvalidOid(hex));
+        }
+        Ok(Self(format!("{}:{hex}", algorithm.as_str())))
+    }
+
+    /// Borrow the canonical tagged string.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Hash algorithm bound by this identifier.
+    #[must_use]
+    pub fn algorithm(&self) -> GitOidAlgorithm {
+        if self.0.starts_with("sha1:") {
+            GitOidAlgorithm::Sha1
+        } else {
+            GitOidAlgorithm::Sha256
+        }
+    }
+
+    /// Borrow the native hexadecimal object name for Git argv only.
+    #[must_use]
+    pub fn hex(&self) -> &str {
+        self.0
+            .split_once(':')
+            .expect("validated GitOid always has an algorithm tag")
+            .1
     }
 }
 
@@ -140,6 +208,13 @@ impl Display for GitOid {
     }
 }
 
+fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,8 +226,9 @@ mod tests {
         let back: ChangeId = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, id);
         assert!(serde_json::from_str::<ChangeId>("\"nope\"").is_err());
-        let wrong_prefix = format!("\"chg_{}\"", "0".repeat(32));
+        let wrong_prefix = format!("\"chg_{}\"", "0".repeat(64));
         assert!(serde_json::from_str::<CandidateId>(&wrong_prefix).is_err());
+        assert!(serde_json::from_str::<ChangeId>(r#"{"id":"chg_00","unknown":true}"#).is_err());
     }
 
     #[test]
@@ -164,11 +240,13 @@ mod tests {
             "chg_",
             "can_abc",
             "chg_zz",
-            &format!("can_{}", "0".repeat(32)),
+            &format!("chg_{}", "0".repeat(32)),
+            &format!("chg_{}", "A".repeat(64)),
+            &format!("can_{}", "0".repeat(64)),
         ] {
             assert!(ChangeId::parse(bad).is_err(), "accepted {bad:?}");
         }
-        assert!(CandidateId::parse(format!("can_{}", "0".repeat(32))).is_ok());
+        assert!(CandidateId::parse(format!("can_{}", "0".repeat(64))).is_ok());
         assert_eq!(
             ChangeId::parse("nope").expect_err("reject").reason_code(),
             "INVALID_ID"
@@ -176,30 +254,67 @@ mod tests {
     }
 
     #[test]
-    fn git_oid_requires_forty_lowercase_hex() {
-        let good = "d6d3b35c8e418f44db2264c04548dafd009a934a";
-        assert_eq!(GitOid::new(good).expect("valid").as_str(), good);
-        for bad in ["", "abc", "git-x"] {
+    fn exact_identifier_json_goldens_are_full_width() {
+        const CHANGE: &str =
+            "\"chg_0000000000000000000000000000000000000000000000000000000000000000\"";
+        const CANDIDATE: &str =
+            "\"can_1111111111111111111111111111111111111111111111111111111111111111\"";
+        const CHECKPOINT: &str =
+            "\"ckp_2222222222222222222222222222222222222222222222222222222222222222\"";
+        assert_eq!(
+            serde_json::to_string(&serde_json::from_str::<ChangeId>(CHANGE).unwrap()).unwrap(),
+            CHANGE
+        );
+        assert_eq!(
+            serde_json::to_string(&serde_json::from_str::<CandidateId>(CANDIDATE).unwrap())
+                .unwrap(),
+            CANDIDATE
+        );
+        assert_eq!(
+            serde_json::to_string(&serde_json::from_str::<CheckpointId>(CHECKPOINT).unwrap())
+                .unwrap(),
+            CHECKPOINT
+        );
+    }
+
+    #[test]
+    fn git_oid_requires_a_known_algorithm_and_exact_lowercase_hex() {
+        let sha1 = "sha1:d6d3b35c8e418f44db2264c04548dafd009a934a";
+        let sha256 = "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        let oid1 = GitOid::new(sha1).expect("sha1");
+        let oid256 = GitOid::new(sha256).expect("sha256");
+        assert_eq!(oid1.algorithm(), GitOidAlgorithm::Sha1);
+        assert_eq!(oid1.hex(), &sha1[5..]);
+        assert_eq!(oid256.algorithm(), GitOidAlgorithm::Sha256);
+        assert_eq!(oid256.hex(), &sha256[7..]);
+        for bad in ["", "abc", "git-x", &sha1[5..], "sha512:abcd"] {
             assert!(GitOid::new(bad).is_err(), "accepted {bad:?}");
         }
-        assert!(GitOid::new(good.to_uppercase()).is_err());
-        assert!(GitOid::new(format!("{good}0")).is_err());
-        let json = format!("\"{good}\"");
-        let oid: GitOid = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(serde_json::to_string(&oid).expect("serialize"), json);
+        assert!(GitOid::new(sha1.to_uppercase()).is_err());
+        assert!(GitOid::new(format!("{sha1}0")).is_err());
+        assert!(GitOid::new(format!("sha256:{}", "a".repeat(40))).is_err());
+        assert!(GitOid::from_hex(GitOidAlgorithm::Sha1, "A".repeat(40)).is_err());
+        for (text, oid) in [(sha1, oid1), (sha256, oid256)] {
+            let json = format!("\"{text}\"");
+            let decoded: GitOid = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, oid);
+            assert_eq!(serde_json::to_string(&decoded).expect("serialize"), json);
+        }
         assert!(serde_json::from_str::<GitOid>("\"short\"").is_err());
+        assert!(serde_json::from_str::<GitOid>(r#"{"oid":"sha1:00","unknown":true}"#).is_err());
     }
 
     #[test]
     fn candidate_id_is_content_derived() {
         let change = ChangeId::from_seed("c");
-        let tree_a = GitOid::new("a".repeat(40)).expect("oid");
-        let tree_b = GitOid::new("b".repeat(40)).expect("oid");
-        let head = GitOid::new("c".repeat(40)).expect("oid");
+        let tree_a = GitOid::from_hex(GitOidAlgorithm::Sha1, "a".repeat(40)).expect("oid");
+        let tree_b = GitOid::from_hex(GitOidAlgorithm::Sha1, "b".repeat(40)).expect("oid");
+        let head = GitOid::from_hex(GitOidAlgorithm::Sha1, "c".repeat(40)).expect("oid");
         let one = CandidateId::from_content(&change, &tree_a, &head);
         let two = CandidateId::from_content(&change, &tree_b, &head);
         assert_ne!(one, two);
         assert_eq!(one, CandidateId::from_content(&change, &tree_a, &head));
         assert!(CandidateId::parse(one.as_str()).is_ok());
+        assert_eq!(one.as_str().len(), "can_".len() + 64);
     }
 }

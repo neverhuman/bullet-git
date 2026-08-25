@@ -39,7 +39,12 @@ pub fn fixture_git(home: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// Create a source repository with one commit. Returns (path, base sha).
+/// Tag native SHA-1 fixture output as a canonical cross-boundary Git OID.
+pub fn sha1_oid(hex: &str) -> String {
+    format!("sha1:{hex}")
+}
+
+/// Create a source repository with one commit. Returns (path, tagged base OID).
 pub fn init_source(root: &Path) -> (PathBuf, String) {
     let home = root.join("fixture-home");
     std::fs::create_dir_all(&home).expect("fixture home");
@@ -66,7 +71,7 @@ pub fn init_source(root: &Path) -> (PathBuf, String) {
             "init",
         ],
     );
-    let base = fixture_git(&home, &["-C", &src_str, "rev-parse", "HEAD"]);
+    let base = sha1_oid(&fixture_git(&home, &["-C", &src_str, "rev-parse", "HEAD"]));
     (src, base)
 }
 

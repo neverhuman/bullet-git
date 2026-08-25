@@ -8,7 +8,7 @@ pub use durable::{DurableJournal, JournalError, JournalMutation};
 use bullet_git_types::{frame, framed_digest, CheckpointId, Digest, GitOid};
 use serde::{Deserialize, Serialize};
 
-const CHECKPOINT_DOMAIN: &[u8] = b"bullet-git.checkpoint.v2";
+const CHECKPOINT_DOMAIN: &[u8] = b"bullet-git.checkpoint.v3";
 const JOURNAL_TREE_DOMAIN: &[u8] = b"bullet-git.journal-tree.v2";
 
 /// What a journal entry did to its path.
@@ -63,7 +63,7 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
-    /// Bind this journal checkpoint to an exact SHA-1 Git tree.
+    /// Bind this journal checkpoint to an exact algorithm-tagged Git tree.
     ///
     /// The full digest and short typed address are both recomputed; attaching a
     /// tree after identity derivation is therefore impossible through this API.
@@ -181,7 +181,6 @@ fn checkpoint_digest(through_seq: u64, tree: &Digest, git_tree: Option<&GitOid>)
             CHECKPOINT_DOMAIN,
             &sequence,
             tree.as_bytes(),
-            b"sha1",
             git_tree.as_str().as_bytes(),
         ]),
         None => framed_digest(&[CHECKPOINT_DOMAIN, &sequence, tree.as_bytes(), b"none"]),
@@ -195,6 +194,7 @@ fn checkpoint_id(digest: &Digest) -> CheckpointId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bullet_git_types::GitOidAlgorithm;
 
     #[test]
     fn checkpoint_covers_ops() {
@@ -235,12 +235,12 @@ mod tests {
         let mut journal = Journal::new();
         journal.record("a.rs", b"body");
         let draft = journal.checkpoint();
-        let a = draft
-            .clone()
-            .bind_git_tree(GitOid::new("a".repeat(40)).expect("tree a"));
-        let b = draft
-            .clone()
-            .bind_git_tree(GitOid::new("b".repeat(40)).expect("tree b"));
+        let a = draft.clone().bind_git_tree(
+            GitOid::from_hex(GitOidAlgorithm::Sha1, "a".repeat(40)).expect("tree a"),
+        );
+        let b = draft.clone().bind_git_tree(
+            GitOid::from_hex(GitOidAlgorithm::Sha1, "b".repeat(40)).expect("tree b"),
+        );
         assert_eq!(a.tree, b.tree, "journal subject is unchanged");
         assert_ne!(a.digest, b.digest);
         assert_ne!(a.id, b.id);
