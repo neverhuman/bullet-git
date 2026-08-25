@@ -69,6 +69,10 @@
       "command": "bash scripts/ci-local.sh required",
       "purpose": "canonical local lane dispatcher exercised by the required lane"
     },
+    "scripts/ci-doctor.sh": {
+      "command": "bash scripts/ci-doctor.sh fast",
+      "purpose": "fail-closed admission of the pinned local tools used by the deterministic fast lane"
+    },
     "docs/architecture.md": {
       "command": "bash scripts/ci-local.sh required",
       "purpose": "daemon trust-boundary contract checked with the required implementation proof"

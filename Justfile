@@ -20,5 +20,12 @@ security:
 audit:
     bash scripts/ci-local.sh audit
 
+[positional-arguments]
+ci-doctor lane="all":
+    bash scripts/ci-doctor.sh "$1"
+
+hooks-install:
+    git config --local core.hooksPath ops/git-hooks
+
 nightly:
     bash scripts/ci-local.sh nightly
