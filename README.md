@@ -40,11 +40,15 @@ simulated inside BulletGit.
 | Lane | Command | Contents |
 | --- | --- | --- |
 | fast | `just fast` | fmt check plus nextest `fast` profile |
-| required | `just check` | fast plus clippy `-D warnings` |
+| required | `just check` | local parity controls (`ops/ci/local-parity-test.sh`), fast, then clippy `-D warnings` |
 | contract | `just contract` | nextest `contract` profile: real local Git suites and the daemon round trip, in-process |
 | security | `just security` | gitleaks (no-git) plus `cargo deny check bans`; a missing tool fails |
-| audit | `bash ops/ci/audit.sh` | Jankurai audit against a committed ratchet floor; artifacts under `.jankurai/` |
-| nightly | `bash ops/ci/nightly.sh` | live jeryu-gitd oracle; neutral unless `BULLET_LIVE_GITD` is set, then fails closed because no oracle is registered |
+| audit | `bash ops/ci/audit.sh` | Jankurai audit against a committed ratchet floor (`AUDIT_FLOOR=56`); artifacts under `.jankurai/` |
+| nightly | `bash ops/ci/nightly.sh` | explicit local entrypoint for a future live `jeryu-gitd` oracle: with `BULLET_LIVE_GITD` unset it logs that no live gitd lane is registered and exits 78 (unregistered, not success); with it set it exits 1 because no oracle adapter is registered; no hosted schedule exists |
 
-`.github/workflows` runs exactly these scripts. Runners must provide
-`cargo-nextest`, `gitleaks`, `cargo-deny`, and `jankurai`.
+`.github/workflows/ci.yml` runs the fast, required, contract, and security
+scripts unchanged with pinned rustc 1.97.1, cargo-nextest 0.9.137, cargo-deny
+0.19.8, and gitleaks 8.21.2; audit and nightly are local-only lanes. Local
+runners must provide `cargo-nextest`, `gitleaks`, `cargo-deny`, and
+`jankurai`; `scripts/ci-doctor.sh <lane>` checks the pinned versions. Lane
+rules are in [`ops/AGENTS.md`](ops/AGENTS.md).
