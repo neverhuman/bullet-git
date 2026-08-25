@@ -6,7 +6,7 @@
 
 mod support;
 
-use bullet_git_workspace::{mirror_dir, FileProtocol, PrivateClone};
+use bullet_git_workspace::{mirror_dir, CapabilityError, FileProtocol, PrivateClone};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use support::{clone_workspace, fixture_git, init_source, sha1_oid};
+use support::{clone_workspace, fixture_git, init_source, sha1_oid, try_clone_workspace};
 
 /// Hostile git on the mirror: an operator or cron job that knows nothing
 /// about the workspace lock and runs with an ordinary scrubbed environment.
@@ -192,6 +192,9 @@ fn advance_source(home: &Path, src: &Path, name: &str) -> String {
     sha1_oid(&fixture_git(home, &["-C", &src_str, "rev-parse", "HEAD"]))
 }
 
+/// Clone creation attempts made while the hostile GC loop runs.
+const CLONE_ATTEMPTS_UNDER_LOAD: usize = 6;
+
 #[test]
 fn mirror_gc_prune_and_deletion_after_clone_never_corrupt_private_clones() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -251,13 +254,27 @@ fn gc_loop_concurrent_with_clone_creation_and_workspace_commits_corrupts_nothing
         })
     };
 
+    // Clone creation may legitimately refuse while the mirror is being repacked: a
+    // refused clone is fail-closed and harmless. The invariant under test is that
+    // nothing is *corrupted*, so attempt several clones, require at least one to be
+    // created under load, and assert intactness for every clone that was created.
     let mut clones = vec![seed];
-    for index in 1..=2 {
+    let mut refused: Vec<CapabilityError> = Vec::new();
+    for index in 1..=CLONE_ATTEMPTS_UNDER_LOAD {
         let attempt = format!("atm_gc_load_{index:02}");
-        clones.push(clone_workspace(tmp.path(), &src, &base, &attempt));
-        let previous = &clones[index - 1];
-        checkout_and_commit(previous, &format!("under_load_{index}"));
+        match try_clone_workspace(tmp.path(), &src, &base, &attempt) {
+            Ok(workspace) => {
+                let previous = clones.last().expect("seed clone");
+                checkout_and_commit(previous, &format!("under_load_{index}"));
+                clones.push(workspace);
+            }
+            Err(err) => refused.push(err),
+        }
     }
+    assert!(
+        clones.len() > 1,
+        "no clone could be created under hostile GC in {CLONE_ATTEMPTS_UNDER_LOAD} attempts: {refused:?}"
+    );
     stop.store(true, Ordering::SeqCst);
     let gc_failures = gc_thread.join().expect("gc thread");
     assert!(

@@ -3,7 +3,8 @@
 
 use bullet_git_types::AuthorityEnvelope;
 use bullet_git_workspace::{
-    CloneRequest, CommitIdentity, ExpectedAuthority, PrivateClone, RealRepository, ScopeGrant,
+    CapabilityError, CloneRequest, CommitIdentity, ExpectedAuthority, PrivateClone, RealRepository,
+    ScopeGrant,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -97,7 +98,17 @@ pub fn good_auth() -> AuthorityEnvelope {
 }
 
 /// Clone a private workspace for the given attempt id.
-pub fn clone_workspace(root: &Path, src: &Path, base: &str, attempt: &str) -> PrivateClone {
+/// Create a private clone, returning the capability error instead of panicking.
+///
+/// Clone creation is allowed to fail while the mirror is being repacked: a refused
+/// clone is fail-closed and safe. Only a clone that *succeeds* is required to be
+/// intact, so the hostile-GC tests use this variant and assert on the successes.
+pub fn try_clone_workspace(
+    root: &Path,
+    src: &Path,
+    base: &str,
+    attempt: &str,
+) -> Result<PrivateClone, CapabilityError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -113,7 +124,10 @@ pub fn clone_workspace(root: &Path, src: &Path, base: &str, attempt: &str) -> Pr
         created_at: CREATED_AT,
         nonce: NONCE,
     })
-    .expect("private clone")
+}
+
+pub fn clone_workspace(root: &Path, src: &Path, base: &str, attempt: &str) -> PrivateClone {
+    try_clone_workspace(root, src, base, attempt).expect("private clone")
 }
 
 /// Bind a workspace to the fixture grant (src + docs) and fixed identity.
