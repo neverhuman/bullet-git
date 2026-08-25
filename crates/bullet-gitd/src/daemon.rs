@@ -1,13 +1,15 @@
 //! Request dispatch. The daemon holds the expected attempt/fence/nonce from
 //! the initial `clone` token and verifies every subsequent call against them.
 
-use crate::authority_gateway::{AuthorityGateway, GatewayError, MutationPermit};
-use crate::mutation_ledger::MutationOperation;
+use crate::authority_gateway::{AuthorityGateway, GatewayError, MutationPermit, PendingMutation};
+use crate::mutation_ledger::{MutationOperation, MutationOutcome};
 use crate::protocol::{
     self, ApplyParams, CleanupParams, CloneParams, PatchParam, PrepareParams, PreserveParams,
     Request,
 };
-use bullet_git_types::{AuthorityError, Change, ChangeId, Digest, WireAuthorityToken};
+use bullet_git_types::{
+    framed_digest, AuthorityError, Change, ChangeId, Digest, WireAuthorityToken,
+};
 use bullet_git_workspace::{
     AgentRepository, CapabilityError, CloneRequest, CommitIdentity, ExpectedAuthority, PatchHunk,
     PreservationAuthority, PrivateClone, RealRepository, ScopeGrant, MAX_CONTENT_BYTES,
@@ -91,6 +93,7 @@ struct Session {
 pub struct Daemon {
     session: Option<Session>,
     authority: AuthorityGateway,
+    mutation_frozen: bool,
 }
 
 impl Default for Daemon {
@@ -110,6 +113,7 @@ impl Daemon {
         Self {
             session: None,
             authority: AuthorityGateway::unavailable(),
+            mutation_frozen: false,
         }
     }
 
@@ -160,6 +164,12 @@ impl Daemon {
         operation: MutationOperation,
         token: &WireAuthorityToken,
     ) -> Result<MutationPermit, MethodError> {
+        if self.mutation_frozen {
+            return Err((
+                "MUTATION_OUTCOME_UNKNOWN".into(),
+                "daemon mutation is frozen after an indeterminate repository outcome".into(),
+            ));
+        }
         self.authority
             .authorize(
                 operation,
@@ -177,15 +187,64 @@ impl Daemon {
         req: &Request,
         operation: MutationOperation,
         permit: MutationPermit,
-    ) -> Result<(), MethodError> {
+    ) -> Result<PendingMutation, MethodError> {
         let now = self
             .authority
             .now_unix_ms()
             .map_err(|error| gateway(&error))?;
         permit
             .consume(operation, &req.token, &req.params, now)
-            .map(|_| ())
             .map_err(|error| gateway(&error))
+    }
+
+    fn settle_result(
+        &mut self,
+        operation: MutationOperation,
+        pending: PendingMutation,
+        result: MethodResult,
+    ) -> MethodResult {
+        let (outcome, payload) = match &result {
+            Ok(value) => (MutationOutcome::Committed, value.clone()),
+            Err((code, message)) => (
+                MutationOutcome::Unknown,
+                json!({"code": code, "message": message}),
+            ),
+        };
+        let encoded = match serde_json::to_vec(&payload) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.mutation_frozen = true;
+                return Err((
+                    "MUTATION_OUTCOME_UNKNOWN".into(),
+                    format!("cannot encode exact mutation result: {error}"),
+                ));
+            }
+        };
+        let result_digest = framed_digest(&[
+            b"bullet-gitd.mutation-result.v1",
+            operation.as_str().as_bytes(),
+            match outcome {
+                MutationOutcome::Committed => b"committed",
+                MutationOutcome::Aborted => b"aborted",
+                MutationOutcome::Unknown => b"unknown",
+            },
+            &encoded,
+        ])
+        .to_hex();
+        if let Err(error) = self.authority.settle(pending, outcome, &result_digest) {
+            self.mutation_frozen = true;
+            return Err(gateway(&error));
+        }
+        match result {
+            Ok(value) => Ok(value),
+            Err((code, message)) => {
+                self.mutation_frozen = true;
+                Err((
+                    "MUTATION_OUTCOME_UNKNOWN".into(),
+                    format!("repository returned {code} after permit consumption: {message}"),
+                ))
+            }
+        }
     }
 
     fn handle_clone(&mut self, req: &Request) -> MethodResult {
@@ -208,35 +267,38 @@ impl Daemon {
             nonce: token.workspace_nonce,
         };
         let permit = self.authorize_mutation(req, MutationOperation::CloneWorkspace, &token)?;
-        self.consume_permit(req, MutationOperation::CloneWorkspace, permit)?;
-        let workspace = PrivateClone::create(&clone_req).map_err(|e| cap(&e))?;
-        let grant = ScopeGrant::new(&params.allowed_prefixes).map_err(|e| cap(&e))?;
-        let expected = ExpectedAuthority {
-            attempt_id: token.attempt_id.clone(),
-            attempt_fence: token.attempt_fence,
-            workspace_nonce: token.workspace_nonce,
-        };
-        let result = json!({
-            "repo_dir": workspace.repo_dir().display().to_string(),
-            "runtime_dir": workspace.runtime_dir().display().to_string(),
-            "branch": workspace.branch(),
-            "base_sha": workspace.base_sha(),
-        });
-        let preservation = PreservationAuthority::open(workspace.runtime_dir())
-            .map_err(|error| (error.reason_code().into(), error.to_string()))?;
-        let repo = RealRepository::new(
-            workspace,
-            grant,
-            expected.clone(),
-            CommitIdentity::farm(&params.commit_date),
-        )
-        .map_err(|error| cap(&error))?;
-        self.session = Some(Session {
-            repo,
-            expected,
-            preservation,
-        });
-        Ok(result)
+        let pending = self.consume_permit(req, MutationOperation::CloneWorkspace, permit)?;
+        let result = (|| {
+            let workspace = PrivateClone::create(&clone_req).map_err(|e| cap(&e))?;
+            let grant = ScopeGrant::new(&params.allowed_prefixes).map_err(|e| cap(&e))?;
+            let expected = ExpectedAuthority {
+                attempt_id: token.attempt_id.clone(),
+                attempt_fence: token.attempt_fence,
+                workspace_nonce: token.workspace_nonce,
+            };
+            let result = json!({
+                "repo_dir": workspace.repo_dir().display().to_string(),
+                "runtime_dir": workspace.runtime_dir().display().to_string(),
+                "branch": workspace.branch(),
+                "base_sha": workspace.base_sha(),
+            });
+            let preservation = PreservationAuthority::open(workspace.runtime_dir())
+                .map_err(|error| (error.reason_code().into(), error.to_string()))?;
+            let repo = RealRepository::new(
+                workspace,
+                grant,
+                expected.clone(),
+                CommitIdentity::farm(&params.commit_date),
+            )
+            .map_err(|error| cap(&error))?;
+            self.session = Some(Session {
+                repo,
+                expected,
+                preservation,
+            });
+            Ok(result)
+        })();
+        self.settle_result(MutationOperation::CloneWorkspace, pending, result)
     }
 
     fn handle_repo(&mut self, req: &Request) -> MethodResult {
@@ -255,20 +317,32 @@ impl Daemon {
                     patches.push(decode_patch(patch)?);
                 }
                 let permit = self.authorize_mutation(req, MutationOperation::ApplyPatch, &token)?;
-                self.consume_permit(req, MutationOperation::ApplyPatch, permit)?;
-                let session = self.session.as_mut().ok_or_else(not_cloned)?;
-                session
-                    .repo
-                    .apply_change(&envelope, &patches)
-                    .map_err(|e| cap(&e))?;
-                Ok(json!({ "applied": patches.len() }))
+                let pending = self.consume_permit(req, MutationOperation::ApplyPatch, permit)?;
+                let result = self
+                    .session
+                    .as_mut()
+                    .ok_or_else(not_cloned)
+                    .and_then(|session| {
+                        session
+                            .repo
+                            .apply_change(&envelope, &patches)
+                            .map_err(|e| cap(&e))?;
+                        Ok(json!({ "applied": patches.len() }))
+                    });
+                self.settle_result(MutationOperation::ApplyPatch, pending, result)
             }
             "checkpoint" => {
                 let permit = self.authorize_mutation(req, MutationOperation::Checkpoint, &token)?;
-                self.consume_permit(req, MutationOperation::Checkpoint, permit)?;
-                let session = self.session.as_mut().ok_or_else(not_cloned)?;
-                let checkpoint = session.repo.checkpoint(&envelope).map_err(|e| cap(&e))?;
-                to_value(&checkpoint)
+                let pending = self.consume_permit(req, MutationOperation::Checkpoint, permit)?;
+                let result = self
+                    .session
+                    .as_mut()
+                    .ok_or_else(not_cloned)
+                    .and_then(|session| {
+                        let checkpoint = session.repo.checkpoint(&envelope).map_err(|e| cap(&e))?;
+                        to_value(&checkpoint)
+                    });
+                self.settle_result(MutationOperation::Checkpoint, pending, result)
             }
             "prepare_candidate" => {
                 let params: PrepareParams = parse_params(&req.params)?;
@@ -279,13 +353,20 @@ impl Daemon {
                 };
                 let permit =
                     self.authorize_mutation(req, MutationOperation::PrepareCandidate, &token)?;
-                self.consume_permit(req, MutationOperation::PrepareCandidate, permit)?;
-                let session = self.session.as_mut().ok_or_else(not_cloned)?;
-                let candidate = session
-                    .repo
-                    .prepare_candidate(&envelope, &change)
-                    .map_err(|e| cap(&e))?;
-                to_value(&candidate)
+                let pending =
+                    self.consume_permit(req, MutationOperation::PrepareCandidate, permit)?;
+                let result = self
+                    .session
+                    .as_mut()
+                    .ok_or_else(not_cloned)
+                    .and_then(|session| {
+                        let candidate = session
+                            .repo
+                            .prepare_candidate(&envelope, &change)
+                            .map_err(|e| cap(&e))?;
+                        to_value(&candidate)
+                    });
+                self.settle_result(MutationOperation::PrepareCandidate, pending, result)
             }
             other => Err(("UNKNOWN_METHOD".into(), format!("unknown method: {other}"))),
         }
@@ -295,42 +376,80 @@ impl Daemon {
         let token = self.verify_token(req)?;
         let params: PreserveParams = parse_params(&req.params)?;
         let permit = self.authorize_mutation(req, MutationOperation::PreserveWorkspace, &token)?;
-        self.consume_permit(req, MutationOperation::PreserveWorkspace, permit)?;
+        let pending = self.consume_permit(req, MutationOperation::PreserveWorkspace, permit)?;
         let envelope = protocol::envelope(&req.token);
-        let session = self.session.as_ref().ok_or_else(not_cloned)?;
-        let receipt = session
-            .preservation
-            .issue(&session.repo, &envelope, Path::new(&params.destination))
-            .map_err(|error| cap(&error))?;
-        Ok(json!({
-            "preservation_receipt": receipt.token(),
-            "preservation_receipt_digest": receipt.receipt_digest().to_hex(),
-            "artifact_digest": receipt.artifact_digest().to_hex(),
-            "destination": receipt.destination().display().to_string(),
-        }))
+        let result = self
+            .session
+            .as_ref()
+            .ok_or_else(not_cloned)
+            .and_then(|session| {
+                let receipt = session
+                    .preservation
+                    .issue(&session.repo, &envelope, Path::new(&params.destination))
+                    .map_err(|error| cap(&error))?;
+                Ok(json!({
+                    "preservation_receipt": receipt.token(),
+                    "preservation_receipt_digest": receipt.receipt_digest().to_hex(),
+                    "artifact_digest": receipt.artifact_digest().to_hex(),
+                    "destination": receipt.destination().display().to_string(),
+                }))
+            });
+        self.settle_result(MutationOperation::PreserveWorkspace, pending, result)
     }
 
     fn handle_cleanup(&mut self, req: &Request) -> MethodResult {
         let token = self.verify_token(req)?;
         let params: CleanupParams = parse_params(&req.params)?;
         let permit = self.authorize_mutation(req, MutationOperation::CleanupWorkspace, &token)?;
-        self.consume_permit(req, MutationOperation::CleanupWorkspace, permit)?;
+        let pending = self.consume_permit(req, MutationOperation::CleanupWorkspace, permit)?;
         let envelope = protocol::envelope(&req.token);
-        let session = self.session.as_mut().ok_or_else(not_cloned)?;
-        let tombstone = session
-            .preservation
-            .cleanup(
-                &mut session.repo,
-                &envelope,
-                &params.preservation_receipt,
-                &params.deleted_at,
-            )
-            .map_err(|error| cap(&error))?;
-        self.session = None;
-        Ok(json!({
-            "tombstone": tombstone.display().to_string(),
-            "preservation_receipt_digest": Digest::of(params.preservation_receipt.as_bytes()).to_hex(),
-            "verified": true,
-        }))
+        let result = (|| {
+            let session = self.session.as_mut().ok_or_else(not_cloned)?;
+            let tombstone = session
+                .preservation
+                .cleanup(
+                    &mut session.repo,
+                    &envelope,
+                    &params.preservation_receipt,
+                    &params.deleted_at,
+                )
+                .map_err(|error| cap(&error))?;
+            self.session = None;
+            Ok(json!({
+                "tombstone": tombstone.display().to_string(),
+                "preservation_receipt_digest": Digest::of(params.preservation_receipt.as_bytes()).to_hex(),
+                "verified": true,
+            }))
+        })();
+        self.settle_result(MutationOperation::CleanupWorkspace, pending, result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indeterminate_daemon_refuses_later_mutation_before_authority() {
+        let mut daemon = Daemon::new();
+        daemon.mutation_frozen = true;
+        let request = Request {
+            id: json!(1),
+            method: "apply_change".into(),
+            token: json!({"paseto": "never consulted"}),
+            params: json!({"patches": []}),
+        };
+        let token = WireAuthorityToken {
+            variant_id: "var_test".into(),
+            attempt_id: "atm_test".into(),
+            attempt_fence: 1,
+            workspace_nonce: [7; 32],
+        };
+        let error = match daemon.authorize_mutation(&request, MutationOperation::ApplyPatch, &token)
+        {
+            Ok(_) => panic!("frozen daemon returned a permit"),
+            Err(error) => error,
+        };
+        assert_eq!(error.0, "MUTATION_OUTCOME_UNKNOWN");
     }
 }

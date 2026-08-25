@@ -78,12 +78,24 @@ tree.
   repository/Workspace IDs or generation, so there is intentionally no
   positive production path until the frozen typed request replaces it. Every
   field is replay-sensitive and malformed IDs, digests, or generations are
-  refused before reservation. Exact terminal results replay without another
-  reservation; changed subjects conflict. A restart with only an in-flight
-  reservation, a partial write, or corrupt state is
+  refused before reservation. A consumed permit becomes a non-cloneable
+  pending mutation. Every daemon mutation reports success only after its exact
+  result digest receives an online settlement acknowledgment matching the
+  Mutation and reservation IDs plus a domain-separated fingerprint over every
+  reservation field, outcome, result, and completion time, and is appended to
+  the local ledger. A repository error is settled as `UNKNOWN`; any
+  post-execution authority outage, response mismatch, clock failure, or local
+  settlement failure is also `MUTATION_OUTCOME_UNKNOWN`, never a proven abort
+  or success. The daemon then freezes all further mutation in-process while
+  retaining read-only inspection for salvage. Exact terminal results replay
+  without another reservation; changed subjects conflict. A restart with only
+  an in-flight reservation, a partial write, or corrupt state is
   `MUTATION_OUTCOME_UNKNOWN`, never permission to retry. This ledger records
-  evidence only and cannot mint authority. The public daemon still has no
-  positive adapter.
+  evidence only and cannot mint authority. The settlement interface and its
+  tests are a transport-neutral lifecycle foundation, not an online client:
+  immutable wire consumption, permit verification, Kernel settlement and
+  cross-process exact-replay adoption remain absent. The public daemon still
+  has no positive adapter.
 - **No remote, no credential.** `git remote remove origin` runs immediately
   after clone; `credential.helper=` is forced empty, `GIT_ASKPASS` points at
   a deny script, `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND=false`. A

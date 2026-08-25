@@ -6,7 +6,8 @@
 //! permit and durable replay machinery without creating a production bypass.
 
 use crate::mutation_ledger::{
-    MutationLedger, MutationLedgerError, MutationOperation, MutationSubject, ReplayDisposition,
+    MutationLedger, MutationLedgerError, MutationOperation, MutationOutcome, MutationSubject,
+    ReplayDisposition,
 };
 use bullet_git_types::{framed_digest, Digest};
 use serde_json::Value;
@@ -35,8 +36,31 @@ struct VerifiedDecision {
     expires_at_unix_ms: u64,
 }
 
+/// Exact settlement submitted after the repository call has returned.
+struct FinalSettlementInput<'a> {
+    subject: &'a MutationSubject,
+    outcome: MutationOutcome,
+    result_digest: &'a str,
+    completed_at_unix_ms: u64,
+    settlement_fingerprint: Digest,
+}
+
+/// Acknowledgment verified by the future frozen online authority consumer.
+#[derive(Clone)]
+struct VerifiedSettlement {
+    mutation_id: String,
+    reservation_id: String,
+    result_digest: String,
+    settlement_fingerprint: Digest,
+}
+
 trait FinalAuthorityCheck: Send {
     fn check(&mut self, input: &FinalCheckInput<'_>) -> Result<VerifiedDecision, GatewayError>;
+
+    fn settle(
+        &mut self,
+        input: &FinalSettlementInput<'_>,
+    ) -> Result<VerifiedSettlement, GatewayError>;
 }
 
 struct UnavailableFinalCheck;
@@ -51,6 +75,23 @@ impl FinalAuthorityCheck for UnavailableFinalCheck {
         );
         Err(GatewayError::ContractUnavailable(
             "frozen bullet-wire authority source and Kernel final-check client are unavailable"
+                .into(),
+        ))
+    }
+
+    fn settle(
+        &mut self,
+        input: &FinalSettlementInput<'_>,
+    ) -> Result<VerifiedSettlement, GatewayError> {
+        let _ = (
+            input.subject,
+            input.outcome,
+            input.result_digest,
+            input.completed_at_unix_ms,
+            input.settlement_fingerprint,
+        );
+        Err(GatewayError::ContractUnavailable(
+            "frozen bullet-wire authority source and Kernel settlement client are unavailable"
                 .into(),
         ))
     }
@@ -87,6 +128,8 @@ pub(crate) enum GatewayError {
     InvalidPermitWindow,
     #[error("trusted clock failed: {0}")]
     Clock(String),
+    #[error("mutation outcome is unknown after repository execution: {0}")]
+    SettlementUnknown(String),
     #[error(transparent)]
     Ledger(#[from] MutationLedgerError),
 }
@@ -101,6 +144,7 @@ impl GatewayError {
             Self::PermitExpired => "MUTATION_PERMIT_EXPIRED",
             Self::InvalidPermitWindow => "INVALID_MUTATION_PERMIT_WINDOW",
             Self::Clock(_) => "AUTHORITY_CLOCK_FAILED",
+            Self::SettlementUnknown(_) => "MUTATION_OUTCOME_UNKNOWN",
             Self::Ledger(error) => error.reason_code(),
         }
     }
@@ -122,7 +166,7 @@ impl MutationPermit {
         authority: &Value,
         params: &Value,
         now_unix_ms: u64,
-    ) -> Result<MutationSubject, GatewayError> {
+    ) -> Result<PendingMutation, GatewayError> {
         let actual = transport_fingerprint(operation, authority, params)?;
         if self.operation != operation || self.transport_fingerprint != actual {
             return Err(GatewayError::SubjectMismatch(
@@ -132,8 +176,16 @@ impl MutationPermit {
         if now_unix_ms >= self.expires_at_unix_ms {
             return Err(GatewayError::PermitExpired);
         }
-        Ok(self.subject)
+        Ok(PendingMutation {
+            subject: self.subject,
+        })
     }
+}
+
+/// Non-cloneable exact mutation that must be settled after repository execution.
+#[must_use = "a consumed mutation permit must be settled"]
+pub(crate) struct PendingMutation {
+    subject: MutationSubject,
 }
 
 /// Authority gateway held by one daemon process.
@@ -214,6 +266,107 @@ impl AuthorityGateway {
     pub(crate) fn now_unix_ms(&self) -> Result<u64, GatewayError> {
         self.clock.now_unix_ms()
     }
+
+    /// Settle one consumed permit against online authority and local replay state.
+    ///
+    /// Once repository execution has started, every refusal, outage, mismatch,
+    /// or local persistence failure is UNKNOWN rather than a proven abort.
+    pub(crate) fn settle(
+        &mut self,
+        pending: PendingMutation,
+        outcome: MutationOutcome,
+        result_digest: &str,
+    ) -> Result<(), GatewayError> {
+        let completed_at_unix_ms = self
+            .clock
+            .now_unix_ms()
+            .map_err(|error| GatewayError::SettlementUnknown(error.to_string()))?;
+        let parsed_digest = Digest::from_hex(result_digest)
+            .map_err(|error| GatewayError::SettlementUnknown(error.to_string()))?;
+        if parsed_digest.to_hex() != result_digest {
+            return Err(GatewayError::SettlementUnknown(
+                "result digest is not full lowercase hexadecimal".into(),
+            ));
+        }
+        let settlement_fingerprint = settlement_fingerprint(
+            &pending.subject,
+            outcome,
+            result_digest,
+            completed_at_unix_ms,
+        );
+        let input = FinalSettlementInput {
+            subject: &pending.subject,
+            outcome,
+            result_digest,
+            completed_at_unix_ms,
+            settlement_fingerprint,
+        };
+        let acknowledgment = self
+            .checker
+            .settle(&input)
+            .map_err(|error| GatewayError::SettlementUnknown(error.to_string()))?;
+        if acknowledgment.mutation_id != input.subject.mutation_id
+            || acknowledgment.reservation_id != input.subject.reservation_id
+            || acknowledgment.result_digest != input.result_digest
+            || acknowledgment.settlement_fingerprint != input.settlement_fingerprint
+        {
+            return Err(GatewayError::SettlementUnknown(
+                "online settlement acknowledgment changed an exact bound field".into(),
+            ));
+        }
+        let ledger = self.ledger.as_mut().ok_or_else(|| {
+            GatewayError::SettlementUnknown("durable authority ledger is unavailable".into())
+        })?;
+        ledger
+            .settle(
+                &pending.subject,
+                outcome,
+                result_digest,
+                completed_at_unix_ms,
+            )
+            .map_err(|error| GatewayError::SettlementUnknown(error.to_string()))?;
+        Ok(())
+    }
+}
+
+fn settlement_fingerprint(
+    subject: &MutationSubject,
+    outcome: MutationOutcome,
+    result_digest: &str,
+    completed_at_unix_ms: u64,
+) -> Digest {
+    let workspace_generation = subject.workspace_generation.to_string();
+    let attempt_fence = subject.attempt_fence.to_string();
+    let authority_epoch = subject.authority_epoch.to_string();
+    let freeze_generation = subject.freeze_generation.to_string();
+    let completed_at = completed_at_unix_ms.to_string();
+    let outcome = match outcome {
+        MutationOutcome::Committed => b"committed".as_slice(),
+        MutationOutcome::Aborted => b"aborted".as_slice(),
+        MutationOutcome::Unknown => b"unknown".as_slice(),
+    };
+    framed_digest(&[
+        b"bullet-gitd.pre-contract-settlement-fingerprint.v1",
+        subject.authority_envelope_digest.as_bytes(),
+        subject.authority_token_nonce.as_bytes(),
+        subject.mutation_id.as_bytes(),
+        subject.reservation_id.as_bytes(),
+        subject.operation.as_str().as_bytes(),
+        subject.request_digest.as_bytes(),
+        subject.repository_id.as_bytes(),
+        subject.workspace_id.as_bytes(),
+        workspace_generation.as_bytes(),
+        subject.workspace_nonce.as_bytes(),
+        subject.attempt_id.as_bytes(),
+        attempt_fence.as_bytes(),
+        authority_epoch.as_bytes(),
+        freeze_generation.as_bytes(),
+        subject.permit_nonce.as_bytes(),
+        subject.permit_digest.as_bytes(),
+        outcome,
+        result_digest.as_bytes(),
+        completed_at.as_bytes(),
+    ])
 }
 
 fn transport_fingerprint(
@@ -234,255 +387,5 @@ fn transport_fingerprint(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mutation_ledger::{MutationOperation, MutationOutcome};
-    use tempfile::TempDir;
-
-    const WRITER_NONCE: [u8; 32] = [7; 32];
-
-    struct FixedClock(u64);
-
-    impl Clock for FixedClock {
-        fn now_unix_ms(&self) -> Result<u64, GatewayError> {
-            Ok(self.0)
-        }
-    }
-
-    struct FixedCheck {
-        subject: MutationSubject,
-        expires_at_unix_ms: u64,
-        mutate_fingerprint: bool,
-    }
-
-    struct SupersededCheck;
-
-    impl FinalAuthorityCheck for SupersededCheck {
-        fn check(
-            &mut self,
-            _input: &FinalCheckInput<'_>,
-        ) -> Result<VerifiedDecision, GatewayError> {
-            Err(GatewayError::Refused(
-                "active lease was superseded before mutation".into(),
-            ))
-        }
-    }
-
-    impl FinalAuthorityCheck for FixedCheck {
-        fn check(&mut self, input: &FinalCheckInput<'_>) -> Result<VerifiedDecision, GatewayError> {
-            let fingerprint = if self.mutate_fingerprint {
-                Digest::of(b"wrong request")
-            } else {
-                input.transport_fingerprint
-            };
-            Ok(VerifiedDecision {
-                subject: self.subject.clone(),
-                operation: input.operation,
-                transport_fingerprint: fingerprint,
-                expires_at_unix_ms: self.expires_at_unix_ms,
-            })
-        }
-    }
-
-    fn subject() -> MutationSubject {
-        MutationSubject {
-            authority_envelope_digest: "a".repeat(64),
-            authority_token_nonce: "b".repeat(64),
-            mutation_id: format!("mut_{}", "1".repeat(64)),
-            reservation_id: format!("rsv_{}", "2".repeat(64)),
-            operation: MutationOperation::ApplyPatch,
-            request_digest: "3".repeat(64),
-            repository_id: format!("rep_{}", "4".repeat(64)),
-            workspace_id: format!("wsp_{}", "5".repeat(64)),
-            workspace_generation: 6,
-            workspace_nonce: hex::encode(WRITER_NONCE),
-            attempt_id: format!("atm_{}", "8".repeat(64)),
-            attempt_fence: 9,
-            authority_epoch: 10,
-            freeze_generation: 0,
-            permit_nonce: "c".repeat(64),
-            permit_digest: "4".repeat(64),
-        }
-    }
-
-    fn gateway(temp: &TempDir, expires: u64, mutate: bool) -> AuthorityGateway {
-        AuthorityGateway {
-            checker: Box::new(FixedCheck {
-                subject: subject(),
-                expires_at_unix_ms: expires,
-                mutate_fingerprint: mutate,
-            }),
-            clock: Box::new(FixedClock(100)),
-            ledger: Some(MutationLedger::open(temp.path()).expect("ledger")),
-        }
-    }
-
-    fn refused(result: Result<MutationPermit, GatewayError>) -> GatewayError {
-        match result {
-            Ok(_) => panic!("unexpected permit"),
-            Err(error) => error,
-        }
-    }
-
-    #[test]
-    fn unavailable_production_gateway_never_returns_a_permit() {
-        let mut gateway = AuthorityGateway::unavailable();
-        let error = refused(gateway.authorize(
-            MutationOperation::ApplyPatch,
-            &serde_json::json!({"paseto": "forged"}),
-            &serde_json::json!({"path": "src/lib.rs"}),
-            &subject().attempt_id,
-            subject().attempt_fence,
-            &WRITER_NONCE,
-        ));
-        assert_eq!(error.reason_code(), "AUTHORITY_CONTRACT_UNAVAILABLE");
-    }
-
-    #[test]
-    fn changed_fields_and_expiry_never_produce_a_consumable_permit() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let authority = serde_json::json!({"paseto": "fixture"});
-        let params = serde_json::json!({"path": "src/lib.rs"});
-
-        let error = refused(gateway(&temp, 200, true).authorize(
-            MutationOperation::ApplyPatch,
-            &authority,
-            &params,
-            &subject().attempt_id,
-            subject().attempt_fence,
-            &WRITER_NONCE,
-        ));
-        assert_eq!(error.reason_code(), "AUTHORITY_SUBJECT_MISMATCH");
-
-        let expired_temp = tempfile::tempdir().expect("tempdir");
-        let error = refused(gateway(&expired_temp, 100, false).authorize(
-            MutationOperation::ApplyPatch,
-            &authority,
-            &params,
-            &subject().attempt_id,
-            subject().attempt_fence,
-            &WRITER_NONCE,
-        ));
-        assert_eq!(error.reason_code(), "MUTATION_PERMIT_EXPIRED");
-
-        let changed = serde_json::json!({"path": "src/other.rs"});
-        for (operation, presented_authority, presented_params) in [
-            (
-                MutationOperation::Checkpoint,
-                authority.clone(),
-                params.clone(),
-            ),
-            (
-                MutationOperation::ApplyPatch,
-                serde_json::json!({"paseto": "changed"}),
-                params.clone(),
-            ),
-            (MutationOperation::ApplyPatch, authority.clone(), changed),
-        ] {
-            let live_temp = tempfile::tempdir().expect("tempdir");
-            let mut live = gateway(&live_temp, 200, false);
-            let permit = live
-                .authorize(
-                    MutationOperation::ApplyPatch,
-                    &authority,
-                    &params,
-                    &subject().attempt_id,
-                    subject().attempt_fence,
-                    &WRITER_NONCE,
-                )
-                .expect("permit");
-            let error = permit
-                .consume(operation, &presented_authority, &presented_params, 101)
-                .expect_err("changed after check");
-            assert_eq!(error.reason_code(), "AUTHORITY_SUBJECT_MISMATCH");
-        }
-    }
-
-    #[test]
-    fn supersession_refusal_creates_no_reservation_or_permit() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut gateway = AuthorityGateway {
-            checker: Box::new(SupersededCheck),
-            clock: Box::new(FixedClock(100)),
-            ledger: Some(MutationLedger::open(temp.path()).expect("ledger")),
-        };
-        let error = refused(gateway.authorize(
-            MutationOperation::ApplyPatch,
-            &serde_json::json!({"paseto": "superseded"}),
-            &serde_json::json!({"path": "src/lib.rs"}),
-            &subject().attempt_id,
-            subject().attempt_fence,
-            &WRITER_NONCE,
-        ));
-        assert_eq!(error.reason_code(), "AUTHORITY_REFUSED");
-        assert_eq!(temp.path().read_dir().expect("ledger dir").count(), 0);
-    }
-
-    #[test]
-    fn settled_replay_never_returns_another_permit() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let exact = subject();
-        let mut ledger = MutationLedger::open(temp.path()).expect("ledger");
-        ledger.reserve(&exact).expect("reserve");
-        ledger
-            .settle(&exact, MutationOutcome::Committed, &"5".repeat(64), 99)
-            .expect("settle");
-        let mut gateway = AuthorityGateway {
-            checker: Box::new(FixedCheck {
-                subject: exact,
-                expires_at_unix_ms: 200,
-                mutate_fingerprint: false,
-            }),
-            clock: Box::new(FixedClock(100)),
-            ledger: Some(ledger),
-        };
-        let error = refused(gateway.authorize(
-            MutationOperation::ApplyPatch,
-            &serde_json::json!({"paseto": "fixture"}),
-            &serde_json::json!({"path": "src/lib.rs"}),
-            &subject().attempt_id,
-            subject().attempt_fence,
-            &WRITER_NONCE,
-        ));
-        assert_eq!(error.reason_code(), "AUTHORITY_REFUSED");
-    }
-
-    #[test]
-    fn changed_writer_incarnation_creates_no_reservation_or_permit() {
-        for changed in [
-            MutationSubject {
-                attempt_id: format!("atm_{}", "6".repeat(64)),
-                ..subject()
-            },
-            MutationSubject {
-                attempt_fence: 11,
-                ..subject()
-            },
-            MutationSubject {
-                workspace_nonce: "6".repeat(64),
-                ..subject()
-            },
-        ] {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let mut gateway = AuthorityGateway {
-                checker: Box::new(FixedCheck {
-                    subject: changed,
-                    expires_at_unix_ms: 200,
-                    mutate_fingerprint: false,
-                }),
-                clock: Box::new(FixedClock(100)),
-                ledger: Some(MutationLedger::open(temp.path()).expect("ledger")),
-            };
-            let error = refused(gateway.authorize(
-                MutationOperation::ApplyPatch,
-                &serde_json::json!({"paseto": "fixture"}),
-                &serde_json::json!({"path": "src/lib.rs"}),
-                &subject().attempt_id,
-                subject().attempt_fence,
-                &WRITER_NONCE,
-            ));
-            assert_eq!(error.reason_code(), "AUTHORITY_SUBJECT_MISMATCH");
-            assert_eq!(temp.path().read_dir().expect("ledger dir").count(), 0);
-        }
-    }
-}
+#[path = "authority_gateway_tests.rs"]
+mod tests;
