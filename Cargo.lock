@@ -53,6 +53,7 @@ name = "bullet-git-journal"
 version = "0.1.0"
 dependencies = [
  "bullet-git-types",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",
@@ -81,6 +82,7 @@ dependencies = [
  "bullet-git-journal",
  "bullet-git-types",
  "hex",
+ "proptest",
  "rustix",
  "serde",
  "serde_json",
