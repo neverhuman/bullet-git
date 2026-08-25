@@ -138,7 +138,7 @@ unsupported error and the test asserts that error.
   never touch Jeryu.
 - `AUDIT_FLOOR` in `ops/ci/audit.sh` is a ratchet: it may only rise.
 - Generated files are never hand-edited:
-  `crates/bullet-git-types/src/schema_bundle.rs` (`agent/generated-zones.toml`)
+  `contracts/generated/rust/schema_bundle.rs` (`agent/generated-zones.toml`)
   comes from the hub sync script; `Cargo.lock` changes come from `cargo`, and
   every lane runs `--locked`; `.jankurai/` is lane output.
 - Local hooks: `just hooks-install` sets `core.hooksPath ops/git-hooks`; the

@@ -12,7 +12,7 @@ The repository binding is this file plus `agent/standard-version.toml`,
 Hard rules for this repository:
 
 - Keep files small. Split before 500 LOC; prefer under 300.
-- Do not hand-edit generated zones: `crates/bullet-git-types/src/schema_bundle.rs`
+- Do not hand-edit generated zones: `contracts/generated/rust/schema_bundle.rs`
   is hub-synced (`agent/generated-zones.toml`).
 - Do not create Git worktrees.
 - `bash scripts/ci-local.sh fast` and `bash scripts/ci-local.sh required` are the

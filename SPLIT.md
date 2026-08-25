@@ -45,7 +45,7 @@ protocol, refs, and protected updates belong to the forge (Jeryu/GitHub).
 - Consume Jeryu and `bullet-wire` only through pinned immutable tags. No
   committed `path = "../…"` dependency; workspace members reference only
   in-repo `crates/…` paths (`Cargo.toml`).
-- `crates/bullet-git-types/src/schema_bundle.rs` is a generated zone
+- `contracts/generated/rust/schema_bundle.rs` is a generated zone
   (`agent/generated-zones.toml`) synced from the hub's
   `contracts/generated/rust/schema_bundle.rs` by
   `bullet-farm/scripts/sync-family-contracts.sh`; never hand-edit.

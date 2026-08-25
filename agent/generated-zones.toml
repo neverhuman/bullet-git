@@ -1,6 +1,6 @@
 # Generated artifacts that must be repaired from their source, never hand-edited.
 [[zone]]
-path = "crates/bullet-git-types/src/schema_bundle.rs"
+path = "contracts/generated/rust/schema_bundle.rs"
 source = "bullet-farm:contracts/generated/rust/schema_bundle.rs"
 command = "bash ../bullet-farm/scripts/sync-family-contracts.sh"
 read_only = true

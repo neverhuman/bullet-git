@@ -24,7 +24,10 @@ cost_surface = []
 # bullet-kernel and the daemon protocol, so renaming them would break the
 # contract, not clean up dead language. `lock_is_stale` in
 # crates/bullet-git-workspace/src/mirror.rs is the same domain word: a lock file
-# whose holder is gone. Every other future-hostile term stays enforced.
+# whose holder is gone. `fallback` is the stable serialized `CopyMode` name for
+# the bounded byte-identical copy path used only when Linux `FICLONE` does not
+# prove a reflink; hostile-PATH, cleanup, and GC-survival tests cover that path.
+# Every other future-hostile term, the separate fallback-soup detector, and all
+# security detectors stay enforced.
 [dead_language]
-allow_terms = ["stale"]
-
+allow_terms = ["stale", "fallback"]
