@@ -87,15 +87,26 @@ tree.
   post-execution authority outage, response mismatch, clock failure, or local
   settlement failure is also `MUTATION_OUTCOME_UNKNOWN`, never a proven abort
   or success. The daemon then freezes all further mutation in-process while
-  retaining read-only inspection for salvage. Exact terminal results replay
-  without another reservation; changed subjects conflict. A restart with only
-  an in-flight reservation, a partial write, or corrupt state is
+  retaining read-only inspection for salvage. On open, the ledger performs a
+  bounded scan of record files opened final-component no-follow/close-on-exec,
+  validates regular type and total size from the opened descriptor, rejects
+  duplicate JSON keys recursively, validates filename-to-Mutation identity and
+  full event bytes, and exposes exact pending or terminal-UNKNOWN subjects
+  through read-only recovery status. Persisted recovery is unsupported and
+  therefore frozen off Unix until an equivalent no-follow primitive exists.
+  Any such subject, corruption,
+  unexpected entry, scan-limit breach, or ambiguous append/fsync globally
+  freezes later reservation and settlement; committed or proven-aborted
+  history alone does not. The gateway checks this recovered freeze before an
+  online final check. Exact successful terminal results replay without another
+  reservation; changed subjects conflict. A restart with only an in-flight
+  reservation, a partial write, or corrupt state is
   `MUTATION_OUTCOME_UNKNOWN`, never permission to retry. This ledger records
-  evidence only and cannot mint authority. The settlement interface and its
-  tests are a transport-neutral lifecycle foundation, not an online client:
-  immutable wire consumption, permit verification, Kernel settlement and
-  cross-process exact-replay adoption remain absent. The public daemon still
-  has no positive adapter.
+  evidence only and cannot mint authority or clear a freeze. The settlement
+  and recovery interfaces are transport-neutral foundations, not an online
+  client: immutable wire consumption, permit verification, Kernel settlement,
+  authenticated replay reconciliation, and cross-process exact-replay
+  adoption remain absent. The public daemon still has no positive adapter.
 - **No remote, no credential.** `git remote remove origin` runs immediately
   after clone; `credential.helper=` is forced empty, `GIT_ASKPASS` points at
   a deny script, `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND=false`. A

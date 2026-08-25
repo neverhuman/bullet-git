@@ -30,6 +30,7 @@ struct FixedCheck {
 }
 
 struct SupersededCheck;
+struct UnexpectedCheck;
 
 impl FinalAuthorityCheck for SupersededCheck {
     fn check(&mut self, _input: &FinalCheckInput<'_>) -> Result<VerifiedDecision, GatewayError> {
@@ -43,6 +44,19 @@ impl FinalAuthorityCheck for SupersededCheck {
         _input: &FinalSettlementInput<'_>,
     ) -> Result<VerifiedSettlement, GatewayError> {
         Err(GatewayError::Refused("no reservation to settle".into()))
+    }
+}
+
+impl FinalAuthorityCheck for UnexpectedCheck {
+    fn check(&mut self, _input: &FinalCheckInput<'_>) -> Result<VerifiedDecision, GatewayError> {
+        panic!("recovered freeze must refuse before final check")
+    }
+
+    fn settle(
+        &mut self,
+        _input: &FinalSettlementInput<'_>,
+    ) -> Result<VerifiedSettlement, GatewayError> {
+        panic!("recovered freeze has no mutation to settle")
     }
 }
 
@@ -170,6 +184,29 @@ fn unavailable_production_gateway_never_returns_a_permit() {
         &WRITER_NONCE,
     ));
     assert_eq!(error.reason_code(), "AUTHORITY_CONTRACT_UNAVAILABLE");
+}
+
+#[test]
+fn recovered_freeze_refuses_before_online_final_check() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    MutationLedger::open(temp.path())
+        .expect("open")
+        .reserve(&subject())
+        .expect("reserve");
+    let mut gateway = AuthorityGateway {
+        checker: Box::new(UnexpectedCheck),
+        clock: Box::new(FixedClock(100)),
+        ledger: Some(MutationLedger::open(temp.path()).expect("reopen")),
+    };
+    let error = refused(gateway.authorize(
+        MutationOperation::ApplyPatch,
+        &serde_json::json!({"paseto": "never sent"}),
+        &serde_json::json!({"path": "src/lib.rs"}),
+        &subject().attempt_id,
+        subject().attempt_fence,
+        &WRITER_NONCE,
+    ));
+    assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
 }
 
 #[test]

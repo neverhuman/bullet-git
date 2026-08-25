@@ -94,6 +94,7 @@ dependencies = [
  "bullet-git-types",
  "bullet-git-workspace",
  "hex",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

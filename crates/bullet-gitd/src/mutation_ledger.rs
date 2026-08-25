@@ -5,10 +5,15 @@
 //! decision. A reservation left in flight across process restart is
 //! `MUTATION_OUTCOME_UNKNOWN`; it is never silently re-authorized.
 
+#[path = "mutation_recovery.rs"]
+mod recovery;
+
+use recovery::{load_record, load_record_for_append, scan_recovery};
+pub use recovery::{IndeterminateMutation, IndeterminateMutationState, MutationRecoveryStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -194,6 +199,7 @@ enum LedgerEvent {
 pub struct MutationLedger {
     root: PathBuf,
     owned_reservations: BTreeSet<String>,
+    recovery: MutationRecoveryStatus,
 }
 
 impl MutationLedger {
@@ -215,10 +221,23 @@ impl MutationLedger {
                 root.display()
             )));
         }
+        let recovery = scan_recovery(&root)?;
         Ok(Self {
             root,
             owned_reservations: BTreeSet::new(),
+            recovery,
         })
+    }
+
+    /// Read-only recovery facts reconstructed from the exact durable records.
+    #[must_use]
+    pub const fn recovery_status(&self) -> &MutationRecoveryStatus {
+        &self.recovery
+    }
+
+    /// Refuse mutation when startup or an in-process write found ambiguity.
+    pub fn require_writable(&self) -> Result<(), MutationLedgerError> {
+        self.recovery.require_writable()
     }
 
     /// Reserve a Mutation ID exactly once.
@@ -229,33 +248,47 @@ impl MutationLedger {
         &mut self,
         subject: &MutationSubject,
     ) -> Result<ReplayDisposition, MutationLedgerError> {
+        self.require_writable()?;
         subject.validate()?;
         let path = self.record_path(subject);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
-                append_event(
+                let persist = append_event(
                     &mut file,
                     &LedgerEvent::Reserved {
                         schema_version: SCHEMA_VERSION,
                         subject: subject.clone(),
                     },
-                )?;
-                sync_directory(&self.root)?;
+                )
+                .and_then(|()| sync_directory(&self.root));
+                if let Err(error) = persist {
+                    self.recovery.mark_corrupt();
+                    return Err(outcome_unknown(
+                        &path,
+                        &format!("reservation durability is ambiguous: {error}"),
+                    ));
+                }
                 self.owned_reservations.insert(subject.mutation_id.clone());
                 Ok(ReplayDisposition::Fresh)
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let state = load_record(&path)?;
+                let state = load_record(&path).inspect_err(|_| {
+                    self.recovery.mark_corrupt();
+                })?;
                 require_same_subject(subject, &state.subject)?;
-                state.result.map_or_else(
-                    || {
+                match state.result {
+                    Some(result) => Ok(ReplayDisposition::ExactReplay(Box::new(result))),
+                    None => {
+                        self.recovery.mark_indeterminate(
+                            state.subject,
+                            IndeterminateMutationState::InFlight,
+                        );
                         Err(MutationLedgerError::OutcomeUnknown(format!(
                             "{} has no terminal settlement",
                             subject.mutation_id
                         )))
-                    },
-                    |result| Ok(ReplayDisposition::ExactReplay(Box::new(result))),
-                )
+                    }
+                }
             }
             Err(error) => Err(io_error(error)),
         }
@@ -270,6 +303,7 @@ impl MutationLedger {
         result_digest: &str,
         completed_at_unix_ms: u64,
     ) -> Result<ReplayDisposition, MutationLedgerError> {
+        self.require_writable()?;
         subject.validate()?;
         validate_digest(result_digest)?;
         if completed_at_unix_ms > MAX_SAFE_INTEGER {
@@ -278,7 +312,9 @@ impl MutationLedger {
             ));
         }
         let path = self.record_path(subject);
-        let state = load_record(&path)?;
+        let (state, mut file) = load_record_for_append(&path).inspect_err(|_| {
+            self.recovery.mark_corrupt();
+        })?;
         require_same_subject(subject, &state.subject)?;
         let requested = MutationResult {
             subject: subject.clone(),
@@ -301,11 +337,7 @@ impl MutationLedger {
                 subject.mutation_id
             )));
         }
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .map_err(io_error)?;
-        append_event(
+        if let Err(error) = append_event(
             &mut file,
             &LedgerEvent::Settled {
                 schema_version: SCHEMA_VERSION,
@@ -314,97 +346,23 @@ impl MutationLedger {
                 result_digest: result_digest.to_owned(),
                 completed_at_unix_ms,
             },
-        )
-        .map_err(|error| {
-            outcome_unknown(
+        ) {
+            self.recovery.mark_corrupt();
+            return Err(outcome_unknown(
                 &path,
                 &format!("terminal settlement is not durably classified: {error}"),
-            )
-        })?;
+            ));
+        }
+        if outcome == MutationOutcome::Unknown {
+            self.recovery
+                .mark_indeterminate(subject.clone(), IndeterminateMutationState::Unknown);
+        }
         Ok(ReplayDisposition::Fresh)
     }
 
     fn record_path(&self, subject: &MutationSubject) -> PathBuf {
         self.root.join(format!("{}.jsonl", subject.mutation_id))
     }
-}
-
-struct LoadedRecord {
-    subject: MutationSubject,
-    result: Option<MutationResult>,
-}
-
-fn load_record(path: &Path) -> Result<LoadedRecord, MutationLedgerError> {
-    if !fs::symlink_metadata(path)
-        .map_err(io_error)?
-        .file_type()
-        .is_file()
-    {
-        return Err(outcome_unknown(path, "ledger record is not a regular file"));
-    }
-    let file = File::open(path).map_err(io_error)?;
-    let mut reader = BufReader::new(file);
-    let mut events = Vec::with_capacity(2);
-    while let Some(line) = crate::protocol::read_frame(&mut reader)
-        .map_err(|error| outcome_unknown(path, &error.to_string()))?
-    {
-        if line.is_empty() {
-            return Err(outcome_unknown(path, "empty ledger frame"));
-        }
-        if events.len() == 2 {
-            return Err(outcome_unknown(path, "too many ledger events"));
-        }
-        let event = serde_json::from_str::<LedgerEvent>(&line)
-            .map_err(|error| outcome_unknown(path, &error.to_string()))?;
-        events.push(event);
-    }
-    let Some(LedgerEvent::Reserved {
-        schema_version,
-        subject,
-    }) = events.first()
-    else {
-        return Err(outcome_unknown(path, "missing initial reservation"));
-    };
-    if *schema_version != SCHEMA_VERSION {
-        return Err(outcome_unknown(
-            path,
-            "unsupported or impossible event sequence",
-        ));
-    }
-    subject
-        .validate()
-        .map_err(|error| outcome_unknown(path, &error.to_string()))?;
-    let result = match events.get(1) {
-        None => None,
-        Some(LedgerEvent::Settled {
-            schema_version,
-            subject: settled_subject,
-            outcome,
-            result_digest,
-            completed_at_unix_ms,
-        }) => {
-            if *schema_version != SCHEMA_VERSION
-                || settled_subject != subject
-                || *completed_at_unix_ms > MAX_SAFE_INTEGER
-                || validate_digest(result_digest).is_err()
-            {
-                return Err(outcome_unknown(path, "invalid terminal settlement"));
-            }
-            Some(MutationResult {
-                subject: subject.clone(),
-                outcome: *outcome,
-                result_digest: result_digest.clone(),
-                completed_at_unix_ms: *completed_at_unix_ms,
-            })
-        }
-        Some(LedgerEvent::Reserved { .. }) => {
-            return Err(outcome_unknown(path, "duplicate reservation"));
-        }
-    };
-    Ok(LoadedRecord {
-        subject: subject.clone(),
-        result,
-    })
 }
 
 fn append_event(file: &mut File, event: &LedgerEvent) -> Result<(), MutationLedgerError> {

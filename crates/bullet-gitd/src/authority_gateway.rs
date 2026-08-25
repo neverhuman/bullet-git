@@ -216,6 +216,9 @@ impl AuthorityGateway {
         expected_fence: u64,
         expected_workspace_nonce: &[u8; 32],
     ) -> Result<MutationPermit, GatewayError> {
+        if let Some(ledger) = self.ledger.as_ref() {
+            ledger.require_writable()?;
+        }
         let fingerprint = transport_fingerprint(operation, authority, params)?;
         let input = FinalCheckInput {
             operation,

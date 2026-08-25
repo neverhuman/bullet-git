@@ -2,7 +2,8 @@
 //! BulletGit mutation ledger. These tests issue no authority.
 
 use bullet_gitd::mutation_ledger::{
-    MutationLedger, MutationOperation, MutationOutcome, MutationSubject, ReplayDisposition,
+    IndeterminateMutationState, MutationLedger, MutationOperation, MutationOutcome,
+    MutationSubject, ReplayDisposition,
 };
 use bullet_gitd::protocol::MAX_FRAME_BYTES;
 
@@ -24,6 +25,16 @@ fn subject() -> MutationSubject {
         freeze_generation: 0,
         permit_nonce: "c".repeat(64),
         permit_digest: "4".repeat(64),
+    }
+}
+
+fn other_subject(marker: char) -> MutationSubject {
+    MutationSubject {
+        mutation_id: format!("mut_{}", marker.to_string().repeat(64)),
+        reservation_id: format!("rsv_{}", marker.to_string().repeat(64)),
+        permit_nonce: marker.to_string().repeat(64),
+        permit_digest: marker.to_string().repeat(64),
+        ..subject()
     }
 }
 
@@ -145,11 +156,43 @@ fn restart_with_only_a_reservation_is_unknown_and_never_fresh() {
         .expect("reserve");
 
     let mut restarted = MutationLedger::open(temp.path()).expect("reopen");
+    let recovery = restarted.recovery_status();
+    assert!(recovery.is_frozen());
+    assert_eq!(recovery.corrupt_record_count(), 0);
+    assert_eq!(recovery.indeterminate().len(), 1);
+    assert_eq!(recovery.indeterminate()[0].subject, exact);
+    assert_eq!(
+        recovery.indeterminate()[0].state,
+        IndeterminateMutationState::InFlight
+    );
     let error = restarted.reserve(&exact).expect_err("unknown");
+    assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
+    let error = restarted
+        .reserve(&other_subject('d'))
+        .expect_err("all mutation frozen");
     assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
     let error = restarted
         .settle(&exact, MutationOutcome::Aborted, &"9".repeat(64), 103)
         .expect_err("cannot settle earlier process");
+    assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
+}
+
+#[test]
+fn same_process_duplicate_pending_reservation_latches_freeze() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let exact = subject();
+    let mut ledger = MutationLedger::open(temp.path()).expect("open");
+    ledger.reserve(&exact).expect("reserve");
+    let error = ledger.reserve(&exact).expect_err("duplicate pending");
+    assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
+    assert!(ledger.recovery_status().is_frozen());
+    assert_eq!(
+        ledger.recovery_status().indeterminate()[0].state,
+        IndeterminateMutationState::InFlight
+    );
+    let error = ledger
+        .settle(&exact, MutationOutcome::Aborted, &"5".repeat(64), 103)
+        .expect_err("freeze cannot be cleared locally");
     assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
 }
 
@@ -160,6 +203,8 @@ fn partial_or_hostile_records_and_ids_fail_closed() {
     let path = temp.path().join(format!("{}.jsonl", exact.mutation_id));
     std::fs::write(&path, b"{\"event\":\"reserved\"").expect("partial record");
     let mut ledger = MutationLedger::open(temp.path()).expect("open");
+    assert!(ledger.recovery_status().is_frozen());
+    assert_eq!(ledger.recovery_status().corrupt_record_count(), 1);
     let error = ledger.reserve(&exact).expect_err("corrupt is unknown");
     assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
 
@@ -167,9 +212,89 @@ fn partial_or_hostile_records_and_ids_fail_closed() {
         mutation_id: "mut_../../escape".into(),
         ..exact
     };
-    let error = ledger.reserve(&invalid).expect_err("invalid id");
-    assert_eq!(error.reason_code(), "INVALID_MUTATION_SUBJECT");
+    let error = ledger
+        .reserve(&invalid)
+        .expect_err("freeze dominates invalid id");
+    assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
     assert!(!temp.path().join("escape.jsonl").exists());
+}
+
+#[test]
+fn terminal_unknown_persists_global_freeze_across_restart() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let exact = subject();
+    let mut ledger = MutationLedger::open(temp.path()).expect("open");
+    ledger.reserve(&exact).expect("reserve");
+    ledger
+        .settle(&exact, MutationOutcome::Unknown, &"5".repeat(64), 104)
+        .expect("settle unknown");
+    assert!(ledger.recovery_status().is_frozen());
+    assert_eq!(
+        ledger.recovery_status().indeterminate()[0].state,
+        IndeterminateMutationState::Unknown
+    );
+
+    let mut restarted = MutationLedger::open(temp.path()).expect("reopen");
+    assert_eq!(
+        restarted.recovery_status().indeterminate()[0].subject,
+        exact
+    );
+    let error = restarted
+        .reserve(&other_subject('d'))
+        .expect_err("unknown freezes different mutation");
+    assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
+}
+
+#[test]
+fn committed_and_aborted_history_does_not_freeze_restart() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let committed = subject();
+    let aborted = other_subject('d');
+    let mut ledger = MutationLedger::open(temp.path()).expect("open");
+    for (subject, outcome, digest) in [
+        (&committed, MutationOutcome::Committed, "5".repeat(64)),
+        (&aborted, MutationOutcome::Aborted, "6".repeat(64)),
+    ] {
+        ledger.reserve(subject).expect("reserve");
+        ledger
+            .settle(subject, outcome, &digest, 105)
+            .expect("settle");
+    }
+
+    let mut restarted = MutationLedger::open(temp.path()).expect("reopen");
+    assert!(!restarted.recovery_status().is_frozen());
+    assert_eq!(
+        restarted.reserve(&other_subject('e')).expect("new reserve"),
+        ReplayDisposition::Fresh
+    );
+}
+
+#[test]
+fn unexpected_or_misnamed_record_freezes_without_claiming_a_subject() {
+    let unexpected = tempfile::tempdir().expect("tempdir");
+    std::fs::write(unexpected.path().join("unexpected"), b"not a record").expect("write");
+    let ledger = MutationLedger::open(unexpected.path()).expect("open");
+    assert!(ledger.recovery_status().is_frozen());
+    assert!(ledger.recovery_status().indeterminate().is_empty());
+    assert_eq!(ledger.recovery_status().corrupt_record_count(), 1);
+
+    let misnamed = tempfile::tempdir().expect("tempdir");
+    let exact = subject();
+    MutationLedger::open(misnamed.path())
+        .expect("open")
+        .reserve(&exact)
+        .expect("reserve");
+    std::fs::rename(
+        misnamed.path().join(format!("{}.jsonl", exact.mutation_id)),
+        misnamed
+            .path()
+            .join(format!("{}.jsonl", other_subject('d').mutation_id)),
+    )
+    .expect("rename");
+    let ledger = MutationLedger::open(misnamed.path()).expect("reopen");
+    assert!(ledger.recovery_status().is_frozen());
+    assert!(ledger.recovery_status().indeterminate().is_empty());
+    assert_eq!(ledger.recovery_status().corrupt_record_count(), 1);
 }
 
 #[test]
@@ -248,9 +373,92 @@ fn oversized_record_is_unknown_without_an_unbounded_parse() {
     let temp = tempfile::tempdir().expect("tempdir");
     let exact = subject();
     let path = temp.path().join(format!("{}.jsonl", exact.mutation_id));
-    std::fs::write(path, vec![b'x'; MAX_FRAME_BYTES + 1]).expect("oversized record");
+    let file = std::fs::File::create(path).expect("create oversized record");
+    file.set_len((2 * (MAX_FRAME_BYTES + 1) + 1) as u64)
+        .expect("sparse oversized record");
 
     let mut ledger = MutationLedger::open(temp.path()).expect("open");
     let error = ledger.reserve(&exact).expect_err("oversized is unknown");
     assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
+}
+
+#[test]
+fn duplicate_keys_at_root_or_in_authority_subject_fail_closed() {
+    for (needle, replacement) in [
+        (
+            "\"schema_version\":1",
+            "\"schema_version\":1,\"schema_version\":1",
+        ),
+        (
+            "\"attempt_fence\":9",
+            "\"attempt_fence\":9,\"attempt_fence\":9",
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let exact = subject();
+        MutationLedger::open(temp.path())
+            .expect("open")
+            .reserve(&exact)
+            .expect("reserve");
+        let path = temp.path().join(format!("{}.jsonl", exact.mutation_id));
+        let record = std::fs::read_to_string(&path).expect("read record");
+        let poisoned = record.replacen(needle, replacement, 1);
+        assert_ne!(poisoned, record, "fixture field must be present");
+        std::fs::write(path, poisoned).expect("poison record");
+
+        let mut restarted = MutationLedger::open(temp.path()).expect("reopen");
+        assert_eq!(restarted.recovery_status().corrupt_record_count(), 1);
+        let error = restarted.reserve(&exact).expect_err("duplicate is unknown");
+        assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
+    }
+}
+
+#[test]
+fn nonregular_record_freezes_without_opening_as_authority() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(temp.path().join("record.jsonl")).expect("directory record");
+    let ledger = MutationLedger::open(temp.path()).expect("open");
+    assert!(ledger.recovery_status().is_frozen());
+    assert_eq!(ledger.recovery_status().corrupt_record_count(), 1);
+    assert!(ledger.recovery_status().indeterminate().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_record_is_never_followed() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target = tempfile::NamedTempFile::new().expect("external target");
+    symlink(target.path(), temp.path().join("record.jsonl")).expect("symlink");
+    let ledger = MutationLedger::open(temp.path()).expect("open");
+    assert!(ledger.recovery_status().is_frozen());
+    assert_eq!(ledger.recovery_status().corrupt_record_count(), 1);
+    assert!(ledger.recovery_status().indeterminate().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn settlement_never_follows_a_swapped_record_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let exact = subject();
+    let mut ledger = MutationLedger::open(temp.path()).expect("open");
+    ledger.reserve(&exact).expect("reserve");
+    let record = temp.path().join(format!("{}.jsonl", exact.mutation_id));
+    std::fs::remove_file(&record).expect("remove owned record");
+    let target = tempfile::NamedTempFile::new().expect("external target");
+    std::fs::write(target.path(), b"sentinel").expect("target sentinel");
+    symlink(target.path(), &record).expect("swap symlink");
+
+    let error = ledger
+        .settle(&exact, MutationOutcome::Committed, &"5".repeat(64), 106)
+        .expect_err("settlement must not follow symlink");
+    assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
+    assert_eq!(
+        std::fs::read(target.path()).expect("read target"),
+        b"sentinel"
+    );
+    assert!(ledger.recovery_status().is_frozen());
 }
