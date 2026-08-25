@@ -2,7 +2,12 @@
 
 mod support;
 
-use bullet_git_types::{AuthorityEnvelope, Candidate, Change, ChangeId, Digest};
+use bullet_git_journal::Checkpoint;
+use bullet_git_types::{
+    AttemptId, AuthorityEnvelope, Candidate, Change, ChangeId, CheckpointId, ContentId, Digest,
+    GateId, PatchMutation, PatchOperation, PatchProposal, Preimage, RepoPath,
+    PATCH_PROPOSAL_SCHEMA_VERSION,
+};
 use bullet_git_workspace::{
     cas_digest, AgentRepository, CommitIdentity, ExpectedAuthority, FileProtocol, ImmutableCas,
     PatchHunk, RealRepository, ScopeGrant, MAX_CAS_OBJECT_BYTES,
@@ -21,6 +26,47 @@ fn change() -> Change {
 
 fn patch(path: &str, contents: &str) -> PatchHunk {
     PatchHunk::write(path, contents.as_bytes().to_vec())
+}
+
+fn proposal(
+    attempt: &AttemptId,
+    checkpoint: &Checkpoint,
+    operations: Vec<PatchOperation>,
+) -> PatchProposal {
+    PatchProposal {
+        schema_version: PATCH_PROPOSAL_SCHEMA_VERSION,
+        proposal_id: ContentId::from_seed("real-repository-proposal"),
+        producing_attempt_id: attempt.clone(),
+        base_checkpoint_id: checkpoint.id.clone(),
+        base_checkpoint_digest: checkpoint.digest,
+        operations,
+        gate_ids: vec![GateId::from_seed("cargo-test")],
+    }
+}
+
+fn proposal_write(path: &str, preimage: Preimage, contents: &str) -> PatchOperation {
+    PatchOperation {
+        path: path.parse::<RepoPath>().expect("canonical path"),
+        preimage,
+        mutation: PatchMutation::Write {
+            content_utf8: contents.into(),
+        },
+    }
+}
+
+fn cas_entries(repo: &RealRepository) -> Vec<String> {
+    let mut entries = std::fs::read_dir(repo.workspace().runtime_dir().join("cas"))
+        .expect("read CAS")
+        .map(|entry| {
+            entry
+                .expect("CAS entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
 }
 
 fn candidate_for(patches: &[PatchHunk], attempt: &str) -> Candidate {
@@ -103,6 +149,32 @@ fn journal_reopens_from_the_workspace_runtime_directory() {
 }
 
 #[test]
+fn active_checkpoint_accessor_is_read_only_clone_metadata() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, ATTEMPT);
+    let repo = real_repo(workspace, ATTEMPT);
+    let before_generation = repo.workspace().generation();
+    let before_journal = repo.journal_ops().to_vec();
+    let before_tree =
+        std::fs::read(repo.workspace().repo_dir().join("src/lib.rs")).expect("tree bytes");
+    let before_cas = cas_entries(&repo);
+
+    let first = repo.active_checkpoint().clone();
+    let second = repo.active_checkpoint().clone();
+
+    assert_eq!(first, second);
+    assert!(first.identity_is_valid());
+    assert_eq!(repo.workspace().generation(), before_generation);
+    assert_eq!(repo.journal_ops(), before_journal);
+    assert_eq!(cas_entries(&repo), before_cas);
+    assert_eq!(
+        std::fs::read(repo.workspace().repo_dir().join("src/lib.rs")).expect("tree unchanged"),
+        before_tree
+    );
+}
+
+#[test]
 fn apply_publishes_one_complete_generation_and_preserves_the_prior_bytes() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (src, base) = init_source(tmp.path());
@@ -136,6 +208,128 @@ fn apply_publishes_one_complete_generation_and_preserves_the_prior_bytes() {
         std::fs::read(reopened.workspace().repo_dir().join("src/lib.rs")).expect("complete next"),
         b"pub fn generation_one() {}\n"
     );
+}
+
+#[test]
+fn apply_proposal_publishes_only_after_exact_checkpoint_and_preimages_match() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let attempt = AttemptId::from_seed("real-proposal-success");
+    let workspace = clone_workspace(tmp.path(), &src, &base, attempt.as_str());
+    let mut repo = real_repo(workspace, attempt.as_str());
+    let auth = envelope(attempt.as_str(), FENCE, NONCE);
+    let before = repo.checkpoint(&auth).expect("base checkpoint");
+    let current =
+        std::fs::read(repo.workspace().repo_dir().join("src/lib.rs")).expect("current preimage");
+    let proposal = proposal(
+        &attempt,
+        &before,
+        vec![
+            proposal_write(
+                "src/lib.rs",
+                Preimage::Digest {
+                    digest: Digest::of(&current),
+                },
+                "pub fn proposal() {}\n",
+            ),
+            proposal_write("src/new.rs", Preimage::Absent, "pub fn added() {}\n"),
+        ],
+    );
+
+    let after = repo
+        .apply_proposal(&auth, &proposal)
+        .expect("exact proposal applies");
+    assert_eq!(repo.workspace().generation(), 1);
+    assert_eq!(repo.journal_ops().len(), 2);
+    assert_ne!(after.id, before.id);
+    assert_ne!(after.digest, before.digest);
+    assert_eq!(repo.checkpoint(&auth).expect("active checkpoint"), after);
+    assert_eq!(
+        std::fs::read(repo.workspace().repo_dir().join("src/lib.rs")).expect("next bytes"),
+        b"pub fn proposal() {}\n"
+    );
+}
+
+#[test]
+fn stale_proposal_subjects_leave_generation_journal_tree_and_cas_unchanged() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (src, base) = init_source(tmp.path());
+    let attempt = AttemptId::from_seed("real-proposal-refusal");
+    let workspace = clone_workspace(tmp.path(), &src, &base, attempt.as_str());
+    let mut repo = real_repo(workspace, attempt.as_str());
+    let auth = envelope(attempt.as_str(), FENCE, NONCE);
+    let checkpoint = repo.checkpoint(&auth).expect("base checkpoint");
+    let target = repo.workspace().repo_dir().join("src/lib.rs");
+    let before_bytes = std::fs::read(&target).expect("before bytes");
+    let before_generation = repo.workspace().generation();
+    let before_journal = repo.journal_ops().to_vec();
+    let before_cas = cas_entries(&repo);
+
+    let assert_unchanged = |repo: &mut RealRepository| {
+        assert_eq!(repo.workspace().generation(), before_generation);
+        assert_eq!(repo.journal_ops(), before_journal);
+        assert_eq!(std::fs::read(&target).expect("tree bytes"), before_bytes);
+        assert_eq!(cas_entries(repo), before_cas, "validation wrote CAS state");
+        assert_eq!(
+            repo.checkpoint(&auth).expect("active checkpoint"),
+            checkpoint
+        );
+    };
+
+    let mut stale_checkpoint = proposal(
+        &attempt,
+        &checkpoint,
+        vec![proposal_write(
+            "src/lib.rs",
+            Preimage::Digest {
+                digest: Digest::of(&before_bytes),
+            },
+            "stale checkpoint must not land\n",
+        )],
+    );
+    stale_checkpoint.base_checkpoint_id = CheckpointId::from_seed("wrong-checkpoint");
+    let error = repo
+        .apply_proposal(&auth, &stale_checkpoint)
+        .expect_err("stale checkpoint refused");
+    assert_eq!(error.reason_code(), "STALE_CHECKPOINT");
+    assert_unchanged(&mut repo);
+
+    let stale_preimage = proposal(
+        &attempt,
+        &checkpoint,
+        vec![
+            proposal_write("src/new.rs", Preimage::Absent, "must remain absent\n"),
+            proposal_write(
+                "src/lib.rs",
+                Preimage::Digest {
+                    digest: Digest::of(b"wrong preimage"),
+                },
+                "stale preimage must not land\n",
+            ),
+        ],
+    );
+    let error = repo
+        .apply_proposal(&auth, &stale_preimage)
+        .expect_err("stale preimage refused");
+    assert_eq!(error.reason_code(), "STALE_PREIMAGE");
+    assert!(!repo.workspace().repo_dir().join("src/new.rs").exists());
+    assert_unchanged(&mut repo);
+
+    let mut wrong_attempt = proposal(
+        &attempt,
+        &checkpoint,
+        vec![proposal_write(
+            "src/new.rs",
+            Preimage::Absent,
+            "not written\n",
+        )],
+    );
+    wrong_attempt.producing_attempt_id = AttemptId::from_seed("different-attempt");
+    let error = repo
+        .apply_proposal(&auth, &wrong_attempt)
+        .expect_err("wrong producing attempt refused");
+    assert_eq!(error.reason_code(), "PROPOSAL_ATTEMPT_MISMATCH");
+    assert_unchanged(&mut repo);
 }
 
 #[test]

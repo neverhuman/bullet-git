@@ -32,7 +32,7 @@ pub use repository::{AgentRepository, CommitIdentity, ExpectedAuthority, RealRep
 pub use safe_git::{FileProtocol, GitOutput, HeadState, SafeGit};
 pub use scope::{normalize_rel_path, ScopeGrant};
 
-use bullet_git_types::{AuthorityError, TypesError};
+use bullet_git_types::{AuthorityError, ProposalError, TypesError};
 use thiserror::Error;
 
 /// Capability error with stable reason codes.
@@ -44,6 +44,20 @@ pub enum CapabilityError {
     /// Token names a different attempt, fence, or workspace nonce.
     #[error("stale authority: {0}")]
     StaleAuthority(String),
+    /// Proposal attempt does not name the active writer incarnation.
+    #[error("proposal attempt mismatch: expected {expected}, found {found}")]
+    ProposalAttemptMismatch {
+        /// Active writer attempt.
+        expected: String,
+        /// Proposal-producing attempt.
+        found: String,
+    },
+    /// Proposal base checkpoint does not equal the active checkpoint.
+    #[error("stale proposal checkpoint: {0}")]
+    StaleCheckpoint(String),
+    /// Proposal path precondition does not equal current bytes/absence.
+    #[error("stale proposal preimage at {0}")]
+    StalePreimage(String),
     /// Path is outside the granted scope.
     #[error("path out of scope: {0}")]
     OutOfScope(String),
@@ -132,6 +146,9 @@ pub enum CapabilityError {
     /// Identity or object-id validation failure.
     #[error("invalid identity or oid: {0}")]
     Types(String),
+    /// Canonical proposal validation failed.
+    #[error(transparent)]
+    Proposal(#[from] ProposalError),
 }
 
 impl CapabilityError {
@@ -141,6 +158,9 @@ impl CapabilityError {
         match self {
             Self::Unauthorized(_) => "UNAUTHORIZED",
             Self::StaleAuthority(_) => "STALE_AUTHORITY",
+            Self::ProposalAttemptMismatch { .. } => "PROPOSAL_ATTEMPT_MISMATCH",
+            Self::StaleCheckpoint(_) => "STALE_CHECKPOINT",
+            Self::StalePreimage(_) => "STALE_PREIMAGE",
             Self::OutOfScope(_) => "OUT_OF_SCOPE",
             Self::PathAbsent(_) => "PATH_ABSENT",
             Self::DuplicatePath(_) => "DUPLICATE_PATH",
@@ -163,6 +183,7 @@ impl CapabilityError {
             Self::HostileGitConfig(_) => "HOSTILE_GIT_CONFIG",
             Self::Io(_) => "IO_FAILED",
             Self::Types(_) => "INVALID_TYPES",
+            Self::Proposal(error) => error.reason_code(),
         }
     }
 }

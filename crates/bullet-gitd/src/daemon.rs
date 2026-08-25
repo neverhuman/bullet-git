@@ -4,8 +4,8 @@
 use crate::authority_gateway::{AuthorityGateway, GatewayError, MutationPermit, PendingMutation};
 use crate::mutation_ledger::{MutationOperation, MutationOutcome};
 use crate::protocol::{
-    self, ApplyParams, CleanupParams, CloneParams, PatchParam, PrepareParams, PreserveParams,
-    Request,
+    self, ApplyParams, ApplyProposalParams, CleanupParams, CloneParams, PatchParam, PrepareParams,
+    PreserveParams, Request,
 };
 use bullet_git_types::{
     framed_digest, AuthorityError, Change, ChangeId, Digest, WireAuthorityToken,
@@ -135,9 +135,8 @@ impl Daemon {
     fn dispatch(&mut self, req: &Request) -> MethodResult {
         match req.method.as_str() {
             "clone" => self.handle_clone(req),
-            "read_tree" | "apply_change" | "checkpoint" | "prepare_candidate" => {
-                self.handle_repo(req)
-            }
+            "read_tree" | "apply_change" | "apply_proposal" | "checkpoint"
+            | "prepare_candidate" => self.handle_repo(req),
             "preserve" => self.handle_preserve(req),
             "cleanup" => self.handle_cleanup(req),
             other => Err(("UNKNOWN_METHOD".into(), format!("unknown method: {other}"))),
@@ -276,12 +275,6 @@ impl Daemon {
                 attempt_fence: token.attempt_fence,
                 workspace_nonce: token.workspace_nonce,
             };
-            let result = json!({
-                "repo_dir": workspace.repo_dir().display().to_string(),
-                "runtime_dir": workspace.runtime_dir().display().to_string(),
-                "branch": workspace.branch(),
-                "base_sha": workspace.base_sha(),
-            });
             let preservation = PreservationAuthority::open(workspace.runtime_dir())
                 .map_err(|error| (error.reason_code().into(), error.to_string()))?;
             let repo = RealRepository::new(
@@ -291,6 +284,15 @@ impl Daemon {
                 CommitIdentity::farm(&params.commit_date),
             )
             .map_err(|error| cap(&error))?;
+            let checkpoint = repo.active_checkpoint().clone();
+            let result = json!({
+                "repo_dir": repo.workspace().repo_dir().display().to_string(),
+                "runtime_dir": repo.workspace().runtime_dir().display().to_string(),
+                "branch": repo.workspace().branch(),
+                "base_sha": repo.workspace().base_sha(),
+                "base_checkpoint_id": checkpoint.id,
+                "base_checkpoint_digest": checkpoint.digest,
+            });
             self.session = Some(Session {
                 repo,
                 expected,
@@ -328,6 +330,29 @@ impl Daemon {
                             .apply_change(&envelope, &patches)
                             .map_err(|e| cap(&e))?;
                         Ok(json!({ "applied": patches.len() }))
+                    });
+                self.settle_result(MutationOperation::ApplyPatch, pending, result)
+            }
+            "apply_proposal" => {
+                let params: ApplyProposalParams = parse_params(&req.params)?;
+                let permit = self.authorize_mutation(req, MutationOperation::ApplyPatch, &token)?;
+                let pending = self.consume_permit(req, MutationOperation::ApplyPatch, permit)?;
+                let applied = params.proposal.operations.len();
+                let proposal_id = params.proposal.proposal_id.clone();
+                let result = self
+                    .session
+                    .as_mut()
+                    .ok_or_else(not_cloned)
+                    .and_then(|session| {
+                        let checkpoint = session
+                            .repo
+                            .apply_proposal(&envelope, &params.proposal)
+                            .map_err(|error| cap(&error))?;
+                        Ok(json!({
+                            "proposal_id": proposal_id,
+                            "applied": applied,
+                            "checkpoint": checkpoint,
+                        }))
                     });
                 self.settle_result(MutationOperation::ApplyPatch, pending, result)
             }
@@ -451,5 +476,22 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.0, "MUTATION_OUTCOME_UNKNOWN");
+    }
+
+    #[test]
+    fn malformed_apply_proposal_is_a_typed_bad_request() {
+        let bad = json!({
+            "proposal": {
+                "schema_version": 1,
+                "proposal_id": "cnt_short",
+                "producing_attempt_id": format!("atm_{}", "2".repeat(64)),
+                "base_checkpoint_id": format!("ckp_{}", "3".repeat(64)),
+                "base_checkpoint_digest": "4".repeat(64),
+                "operations": [],
+                "gate_ids": [format!("gat_{}", "5".repeat(64))]
+            }
+        });
+        let error = parse_params::<ApplyProposalParams>(&bad).expect_err("malformed refused");
+        assert_eq!(error.0, "BAD_REQUEST");
     }
 }

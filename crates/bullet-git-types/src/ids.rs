@@ -9,7 +9,7 @@ const ID_HEX_LEN: usize = 64;
 macro_rules! typed_id {
     ($name:ident, $prefix:literal) => {
         #[doc = concat!("Typed `", $prefix, "` identifier.")]
-        #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
 
@@ -72,6 +72,9 @@ macro_rules! typed_id {
 typed_id!(ChangeId, "chg");
 typed_id!(CandidateId, "can");
 typed_id!(CheckpointId, "ckp");
+typed_id!(AttemptId, "atm");
+typed_id!(ContentId, "cnt");
+typed_id!(GateId, "gat");
 
 impl CandidateId {
     /// Content-derived identity: the exact change, tree, and head commit.

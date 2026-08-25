@@ -1,7 +1,6 @@
 //! AgentRepository operations over immutable workspace generations.
 
 use super::*;
-use crate::apply::{apply_all, restore_all};
 use crate::clone::sequencer_check;
 
 impl AgentRepository for RealRepository {
@@ -30,19 +29,25 @@ impl AgentRepository for RealRepository {
         self.expected.require(auth)?;
         self.guard()?;
         let normalized = self.validate_patches(patches)?;
-        let mutations = self.prepare_journal_mutations(patches, &normalized)?;
-        let stage = self.workspace.stage_generation()?;
-        let stage_repo = stage.repo_dir();
-        let mut stage_journal = DurableJournal::open(stage.journal_dir())?;
-        let mut ignored_undo = Vec::new();
-        if let Err(error) = apply_all(&stage_repo, patches, &normalized, &mut ignored_undo) {
-            restore_all(&ignored_undo);
-            return Err(error);
-        }
-        stage_journal.record_batch(&mutations)?;
-        validate_journal_objects(&stage_journal, &self.cas)?;
-        let checkpoint = self.write_tree_checkpoint(&stage_repo, &stage_journal)?;
-        self.publish_stage(stage, checkpoint)
+        self.publish_patches(patches, &normalized).map(|_| ())
+    }
+
+    fn apply_proposal(
+        &mut self,
+        auth: &AuthorityEnvelope,
+        proposal: &PatchProposal,
+    ) -> Result<Checkpoint, CapabilityError> {
+        self.require_healthy()?;
+        self.expected.require(auth)?;
+        self.guard()?;
+        proposal.validate()?;
+        self.require_proposal_attempt(proposal)?;
+        let active = self.validate_active_checkpoint()?;
+        self.require_proposal_checkpoint(proposal, &active)?;
+        let patches = Self::proposal_patches(proposal);
+        let normalized = self.validate_patches(&patches)?;
+        let preimages = self.require_proposal_preimages(proposal, &normalized)?;
+        self.publish_proposal_patches(proposal, &patches, &normalized, &preimages)
     }
 
     fn checkpoint(&mut self, auth: &AuthorityEnvelope) -> Result<Checkpoint, CapabilityError> {

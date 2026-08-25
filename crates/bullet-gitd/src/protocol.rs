@@ -1,7 +1,7 @@
 //! Line-delimited JSON protocol: one request object per line, one response
 //! object per line. Documented in `docs/architecture.md`.
 
-use bullet_git_types::AuthorityEnvelope;
+use bullet_git_types::{AuthorityEnvelope, PatchProposal};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::BufRead;
@@ -77,7 +77,8 @@ pub fn read_frame(reader: &mut impl BufRead) -> Result<Option<String>, FrameRead
 pub struct Request {
     /// Correlation id, echoed back verbatim.
     pub id: Value,
-    /// clone | read_tree | apply_change | checkpoint | prepare_candidate | preserve | cleanup.
+    /// clone | read_tree | apply_change | apply_proposal | checkpoint |
+    /// prepare_candidate | preserve | cleanup.
     pub method: String,
     /// AuthorityToken JSON object. A string is treated as raw token bytes;
     /// null or absent as an empty token. Both fail verification.
@@ -156,6 +157,15 @@ pub struct ApplyParams {
     pub patches: Vec<PatchParam>,
 }
 
+/// `apply_proposal` parameters. The nested proposal is the canonical typed
+/// write subject; model commentary and legacy flattened patches are refused.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyProposalParams {
+    /// Exact schema-1 proposal.
+    pub proposal: PatchProposal,
+}
+
 /// `prepare_candidate` parameters.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -203,5 +213,37 @@ mod tests {
         let mut invalid = Cursor::new(vec![0xff, b'\n']);
         let error = read_frame(&mut invalid).expect_err("invalid UTF-8 refused");
         assert_eq!(error.reason_code(), "INVALID_UTF8");
+    }
+
+    #[test]
+    fn apply_proposal_params_deny_legacy_and_model_fields() {
+        let proposal = json!({
+            "schema_version": 1,
+            "proposal_id": format!("cnt_{}", "1".repeat(64)),
+            "producing_attempt_id": format!("atm_{}", "2".repeat(64)),
+            "base_checkpoint_id": format!("ckp_{}", "3".repeat(64)),
+            "base_checkpoint_digest": "4".repeat(64),
+            "operations": [{
+                "path": "src/lib.rs",
+                "preimage": {"kind": "absent"},
+                "mutation": {"kind": "write", "content_utf8": "next"}
+            }],
+            "gate_ids": [format!("gat_{}", "5".repeat(64))]
+        });
+        let decoded: ApplyProposalParams =
+            serde_json::from_value(json!({"proposal": proposal.clone()})).expect("canonical");
+        decoded.proposal.validate().expect("semantic validation");
+
+        let mut proposal_with_comment = proposal.clone();
+        proposal_with_comment["intent_summary"] = json!("model text");
+        for bad in [
+            json!({"proposal": proposal.clone(), "patches": []}),
+            json!({"proposal": proposal_with_comment}),
+        ] {
+            assert!(
+                serde_json::from_value::<ApplyProposalParams>(bad).is_err(),
+                "non-canonical params accepted"
+            );
+        }
     }
 }

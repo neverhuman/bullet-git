@@ -9,7 +9,7 @@ pub mod protocol;
 use bullet_git_journal::{Checkpoint, Journal};
 use bullet_git_types::{
     frame, framed_digest, AuthorityEnvelope, Candidate, CandidateId, Change, Digest, EvolutionEdge,
-    EvolutionKind, GitOid, GitOidAlgorithm, ProofRoot,
+    EvolutionKind, GitOid, GitOidAlgorithm, PatchMutation, PatchProposal, Preimage, ProofRoot,
 };
 use bullet_git_workspace::{
     validate_batch, AgentRepository, CapabilityError, ExpectedAuthority, PatchHunk, PatchOp,
@@ -123,6 +123,66 @@ impl AgentRepository for MemoryRepository {
             }
         }
         Ok(())
+    }
+
+    fn apply_proposal(
+        &mut self,
+        auth: &AuthorityEnvelope,
+        proposal: &PatchProposal,
+    ) -> Result<Checkpoint, CapabilityError> {
+        self.expected.require(auth)?;
+        if self.is_worktree {
+            return Err(CapabilityError::WorktreeForbidden("memory".into()));
+        }
+        proposal.validate()?;
+        if proposal.producing_attempt_id.as_str() != self.expected.attempt_id {
+            return Err(CapabilityError::ProposalAttemptMismatch {
+                expected: self.expected.attempt_id.clone(),
+                found: proposal.producing_attempt_id.to_string(),
+            });
+        }
+        let active = self.journal.checkpoint();
+        if proposal.base_checkpoint_id != active.id
+            || proposal.base_checkpoint_digest != active.digest
+        {
+            return Err(CapabilityError::StaleCheckpoint(format!(
+                "expected {}:{}, found {}:{}",
+                active.id,
+                active.digest.to_hex(),
+                proposal.base_checkpoint_id,
+                proposal.base_checkpoint_digest.to_hex()
+            )));
+        }
+        let patches = proposal
+            .operations
+            .iter()
+            .map(|operation| match &operation.mutation {
+                PatchMutation::Write { content_utf8 } => {
+                    PatchHunk::write(operation.path.as_str(), content_utf8.as_bytes().to_vec())
+                }
+                PatchMutation::Delete => PatchHunk::delete(operation.path.as_str()),
+            })
+            .collect::<Vec<_>>();
+        let normalized = validate_batch(&self.grant, &patches, |path| {
+            self.files.iter().any(|(candidate, _)| candidate == path)
+        })?;
+        for (operation, path) in proposal.operations.iter().zip(&normalized) {
+            let current = self
+                .files
+                .iter()
+                .find(|(candidate, _)| candidate == path)
+                .map(|(_, bytes)| bytes);
+            let matches = match (&operation.preimage, current) {
+                (Preimage::Absent, None) => true,
+                (Preimage::Digest { digest }, Some(bytes)) => Digest::of(bytes) == *digest,
+                _ => false,
+            };
+            if !matches {
+                return Err(CapabilityError::StalePreimage(path.clone()));
+            }
+        }
+        self.apply_change(auth, &patches)?;
+        Ok(self.journal.checkpoint())
     }
 
     fn checkpoint(&mut self, auth: &AuthorityEnvelope) -> Result<Checkpoint, CapabilityError> {

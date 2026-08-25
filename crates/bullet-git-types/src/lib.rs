@@ -3,11 +3,18 @@
 mod authority;
 mod change;
 mod ids;
+mod proposal;
 pub mod schema_bundle;
 
 pub use authority::{AuthorityEnvelope, AuthorityError, WireAuthorityToken};
 pub use change::{Candidate, Change, EvolutionEdge, EvolutionKind, ProofRoot};
-pub use ids::{CandidateId, ChangeId, CheckpointId, GitOid, GitOidAlgorithm};
+pub use ids::{
+    AttemptId, CandidateId, ChangeId, CheckpointId, ContentId, GateId, GitOid, GitOidAlgorithm,
+};
+pub use proposal::{
+    PatchMutation, PatchOperation, PatchProposal, Preimage, ProposalError, RepoPath,
+    PATCH_PROPOSAL_SCHEMA_VERSION,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -67,6 +74,15 @@ impl Digest {
     ///
     /// Returns `TypesError::Encoding` when the text is not 32 bytes of hex.
     pub fn from_hex(text: &str) -> Result<Self, TypesError> {
+        if text.len() != 64
+            || !text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(TypesError::Encoding(
+                "digest must be 64 lowercase hexadecimal characters".into(),
+            ));
+        }
         let raw = hex::decode(text).map_err(|err| TypesError::Encoding(err.to_string()))?;
         let bytes: [u8; 32] = raw
             .try_into()
@@ -76,6 +92,7 @@ impl Digest {
 }
 
 mod hex_bytes {
+    use super::Digest;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8; 32], ser: S) -> Result<S::Ok, S::Error> {
@@ -84,11 +101,9 @@ mod hex_bytes {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[u8; 32], D::Error> {
         let text = String::deserialize(de)?;
-        let raw = hex::decode(&text).map_err(serde::de::Error::custom)?;
-        let slice: [u8; 32] = raw
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("digest must be 32 bytes"))?;
-        Ok(slice)
+        Digest::from_hex(&text)
+            .map(|digest| *digest.as_bytes())
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -144,5 +159,12 @@ mod tests {
             Digest::from_hex("ab").expect_err("reject").reason_code(),
             "ENCODING"
         );
+        assert_eq!(
+            Digest::from_hex(&"A".repeat(64))
+                .expect_err("uppercase refused")
+                .reason_code(),
+            "ENCODING"
+        );
+        assert!(serde_json::from_str::<Digest>(&format!("\"{}\"", "A".repeat(64))).is_err());
     }
 }

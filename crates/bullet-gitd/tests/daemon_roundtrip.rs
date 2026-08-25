@@ -84,6 +84,32 @@ fn self_authored_token_cannot_create_a_workspace() {
     }));
     assert_eq!(response["err"]["code"], "AUTHORITY_CONTRACT_UNAVAILABLE");
     assert!(!root.exists(), "authority refusal must precede clone I/O");
+
+    let proposal_response = conversation.send(&json!({
+        "id": 2,
+        "method": "apply_proposal",
+        "token": token(),
+        "params": {
+            "proposal": {
+                "schema_version": 1,
+                "proposal_id": format!("cnt_{}", "1".repeat(64)),
+                "producing_attempt_id": format!("atm_{}", "2".repeat(64)),
+                "base_checkpoint_id": format!("ckp_{}", "3".repeat(64)),
+                "base_checkpoint_digest": "4".repeat(64),
+                "operations": [{
+                    "path": "src/lib.rs",
+                    "preimage": {"kind": "absent"},
+                    "mutation": {"kind": "write", "content_utf8": "next"}
+                }],
+                "gate_ids": [format!("gat_{}", "5".repeat(64))]
+            }
+        }
+    }));
+    assert_eq!(
+        proposal_response["err"]["code"], "NOT_CLONED",
+        "registered proposal method must still require an authority-created session"
+    );
+    assert!(!root.exists(), "proposal refusal must not create state");
     conversation.finish();
 }
 

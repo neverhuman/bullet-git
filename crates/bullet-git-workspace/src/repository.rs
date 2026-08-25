@@ -10,7 +10,8 @@ use crate::status::{parse_status_line, StatusEntry};
 use crate::CapabilityError;
 use bullet_git_journal::{Checkpoint, DurableJournal, JournalMutation};
 use bullet_git_types::{
-    AuthorityEnvelope, Candidate, CandidateId, Change, Digest, GitOid, WireAuthorityToken,
+    AuthorityEnvelope, Candidate, CandidateId, Change, Digest, GitOid, PatchMutation,
+    PatchProposal, Preimage, WireAuthorityToken,
 };
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -42,6 +43,20 @@ pub trait AgentRepository {
         auth: &AuthorityEnvelope,
         patches: &[PatchHunk],
     ) -> Result<(), CapabilityError>;
+
+    /// Apply one canonical proposal against its exact checkpoint and path
+    /// preimages. The returned checkpoint is the newly active generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns authority, proposal, checkpoint, preimage, scope, symlink, or
+    /// generation errors. Any validation refusal leaves the prior generation
+    /// and journal authoritative.
+    fn apply_proposal(
+        &mut self,
+        auth: &AuthorityEnvelope,
+        proposal: &PatchProposal,
+    ) -> Result<Checkpoint, CapabilityError>;
 
     /// Checkpoint the journal and the working tree without touching the live
     /// index (temporary `GIT_INDEX_FILE`).
@@ -184,6 +199,16 @@ impl RealRepository {
         self.journal.ops()
     }
 
+    /// Borrow the already-validated active generation checkpoint.
+    ///
+    /// Construction and every generation publication validate this exact
+    /// persisted checkpoint. Reading it performs no Git, journal, CAS, tree,
+    /// generation, or authority-settlement operation.
+    #[must_use]
+    pub fn active_checkpoint(&self) -> &Checkpoint {
+        self.workspace.generation_checkpoint()
+    }
+
     fn guard(&self) -> Result<(), CapabilityError> {
         guard_repository(self.workspace.git(), self.workspace.repo_dir())
     }
@@ -223,6 +248,134 @@ impl RealRepository {
             self.symlink_check(path)?;
         }
         Ok(normalized)
+    }
+
+    fn proposal_patches(proposal: &PatchProposal) -> Vec<PatchHunk> {
+        proposal
+            .operations
+            .iter()
+            .map(|operation| match &operation.mutation {
+                PatchMutation::Write { content_utf8 } => {
+                    PatchHunk::write(operation.path.as_str(), content_utf8.as_bytes().to_vec())
+                }
+                PatchMutation::Delete => PatchHunk::delete(operation.path.as_str()),
+            })
+            .collect()
+    }
+
+    fn require_proposal_attempt(&self, proposal: &PatchProposal) -> Result<(), CapabilityError> {
+        if proposal.producing_attempt_id.as_str() == self.expected.attempt_id {
+            Ok(())
+        } else {
+            Err(CapabilityError::ProposalAttemptMismatch {
+                expected: self.expected.attempt_id.clone(),
+                found: proposal.producing_attempt_id.to_string(),
+            })
+        }
+    }
+
+    fn require_proposal_checkpoint(
+        &self,
+        proposal: &PatchProposal,
+        active: &Checkpoint,
+    ) -> Result<(), CapabilityError> {
+        if proposal.base_checkpoint_id == active.id
+            && proposal.base_checkpoint_digest == active.digest
+        {
+            Ok(())
+        } else {
+            Err(CapabilityError::StaleCheckpoint(format!(
+                "expected {}:{}, found {}:{}",
+                active.id,
+                active.digest.to_hex(),
+                proposal.base_checkpoint_id,
+                proposal.base_checkpoint_digest.to_hex()
+            )))
+        }
+    }
+
+    fn require_proposal_preimages(
+        &self,
+        proposal: &PatchProposal,
+        normalized: &[String],
+    ) -> Result<Vec<Option<Vec<u8>>>, CapabilityError> {
+        let mut verified = Vec::with_capacity(proposal.operations.len());
+        for (operation, path) in proposal.operations.iter().zip(normalized) {
+            let current = read_proposal_file_nofollow(self.workspace.repo_dir(), path)?;
+            match (&operation.preimage, current) {
+                (Preimage::Absent, None) => verified.push(None),
+                (Preimage::Digest { digest }, Some(bytes)) if Digest::of(&bytes) == *digest => {
+                    verified.push(Some(bytes));
+                }
+                _ => return Err(CapabilityError::StalePreimage(path.clone())),
+            }
+        }
+        Ok(verified)
+    }
+
+    fn publish_patches(
+        &mut self,
+        patches: &[PatchHunk],
+        normalized: &[String],
+    ) -> Result<Checkpoint, CapabilityError> {
+        let mutations = self.prepare_journal_mutations(patches, normalized)?;
+        self.publish_prepared_patches(patches, normalized, &mutations)
+    }
+
+    fn publish_proposal_patches(
+        &mut self,
+        proposal: &PatchProposal,
+        patches: &[PatchHunk],
+        normalized: &[String],
+        preimages: &[Option<Vec<u8>>],
+    ) -> Result<Checkpoint, CapabilityError> {
+        let mutations = proposal
+            .operations
+            .iter()
+            .zip(normalized)
+            .zip(preimages)
+            .map(|((operation, path), prior)| {
+                let before = prior
+                    .as_deref()
+                    .map(|bytes| self.cas.put(bytes).map(|stored| stored.digest))
+                    .transpose()?;
+                match &operation.mutation {
+                    PatchMutation::Write { content_utf8 } => Ok(JournalMutation::write(
+                        path,
+                        before,
+                        self.cas.put(content_utf8.as_bytes())?.digest,
+                    )),
+                    PatchMutation::Delete => Ok(JournalMutation::delete(
+                        path,
+                        before.expect("validated delete always has stable preimage bytes"),
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>, CapabilityError>>()?;
+        self.publish_prepared_patches(patches, normalized, &mutations)
+    }
+
+    fn publish_prepared_patches(
+        &mut self,
+        patches: &[PatchHunk],
+        normalized: &[String],
+        mutations: &[JournalMutation],
+    ) -> Result<Checkpoint, CapabilityError> {
+        let stage = self.workspace.stage_generation()?;
+        let stage_repo = stage.repo_dir();
+        let mut stage_journal = DurableJournal::open(stage.journal_dir())?;
+        let mut ignored_undo = Vec::new();
+        if let Err(error) =
+            crate::apply::apply_all(&stage_repo, patches, normalized, &mut ignored_undo)
+        {
+            crate::apply::restore_all(&ignored_undo);
+            return Err(error);
+        }
+        stage_journal.record_batch(mutations)?;
+        validate_journal_objects(&stage_journal, &self.cas)?;
+        let checkpoint = self.write_tree_checkpoint(&stage_repo, &stage_journal)?;
+        self.publish_stage(stage, checkpoint.clone())?;
+        Ok(checkpoint)
     }
 
     fn status_scan(&self) -> Result<Vec<StatusEntry>, CapabilityError> {
@@ -427,6 +580,84 @@ impl RealRepository {
                 .into())
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_proposal_file_nofollow(
+    repo_dir: &Path,
+    path: &str,
+) -> Result<Option<Vec<u8>>, CapabilityError> {
+    use rustix::fs::{open, openat2, Mode, OFlags, ResolveFlags};
+    use std::io::Read as _;
+
+    let root = open(
+        repo_dir,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|error| CapabilityError::Io(format!("open proposal repository root: {error}")))?;
+    let descriptor = match openat2(
+        &root,
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+        Err(_) => return Err(CapabilityError::StalePreimage(path.to_owned())),
+    };
+    let mut file = File::from(descriptor);
+    if !file
+        .metadata()
+        .map_err(|error| crate::io_err("inspect proposal preimage descriptor", &error))?
+        .is_file()
+    {
+        return Err(CapabilityError::StalePreimage(path.to_owned()));
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take((crate::MAX_CAS_OBJECT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| crate::io_err("read proposal preimage descriptor", &error))?;
+    if bytes.len() > crate::MAX_CAS_OBJECT_BYTES {
+        return Err(CasError::ObjectTooLarge {
+            max: crate::MAX_CAS_OBJECT_BYTES,
+            actual: bytes.len(),
+        }
+        .into());
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_proposal_file_nofollow(
+    _repo_dir: &Path,
+    _path: &str,
+) -> Result<Option<Vec<u8>>, CapabilityError> {
+    Err(CapabilityError::Io(
+        "safe proposal preimage reads require the admitted Linux openat2 backend".into(),
+    ))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod proposal_preimage_tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_relative_read_never_follows_parent_symlink() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&repo).expect("repo");
+        fs::create_dir(&outside).expect("outside");
+        fs::write(outside.join("secret"), b"outside bytes").expect("outside fixture");
+        std::os::unix::fs::symlink(&outside, repo.join("src")).expect("parent symlink");
+
+        let error =
+            read_proposal_file_nofollow(&repo, "src/secret").expect_err("parent symlink refused");
+        assert_eq!(error.reason_code(), "STALE_PREIMAGE");
     }
 }
 
