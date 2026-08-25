@@ -10,7 +10,7 @@ use bullet_git_journal::{Checkpoint, Journal};
 use bullet_git_types::{
     frame, framed_digest, AuthorityEnvelope, Candidate, CandidateManifest, CandidateProvenance,
     Change, ChangeEvolution, ChangeId, Digest, EvolutionEdge, EvolutionKind, GitOid,
-    GitOidAlgorithm, PatchMutation, PatchProposal, Preimage, ProofRoot, RepoPath,
+    GitOidAlgorithm, PatchMutation, PatchProposal, Preimage, ProofInputs, ProofRoot, RepoPath,
 };
 use bullet_git_workspace::{
     validate_batch, AgentRepository, CapabilityError, ExpectedAuthority, PatchHunk, PatchOp,
@@ -330,7 +330,16 @@ fn require_memory_candidate_field(
 /// Convenience helper for proof roots after prepare.
 #[must_use]
 pub fn bind_proof(candidate: &Candidate) -> ProofRoot {
-    ProofRoot::compute(candidate, b"scope", b"evidence", b"reviews", b"policy")
+    ProofRoot::bind(
+        candidate,
+        &ProofInputs {
+            scope_and_write_set: b"scope",
+            evidence: b"evidence",
+            reviews: b"reviews",
+            policy: b"policy",
+            ..ProofInputs::empty()
+        },
+    )
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
 //! Line-delimited JSON protocol: one request object per line, one response
 //! object per line. Documented in `docs/architecture.md`.
 
-use bullet_git_types::{AuthorityEnvelope, CandidateProvenance, Change, PatchProposal};
+use bullet_git_types::{
+    AuthorityEnvelope, Candidate, CandidateProvenance, Change, PatchProposal, ProofRoot,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::BufRead;
@@ -78,7 +80,7 @@ pub struct Request {
     /// Correlation id, echoed back verbatim.
     pub id: Value,
     /// clone | read_tree | apply_change | apply_proposal | checkpoint |
-    /// prepare_candidate | preserve | cleanup.
+    /// prepare_candidate | bind_proof | verify_proof_root | preserve | cleanup.
     pub method: String,
     /// AuthorityToken JSON object. A string is treated as raw token bytes;
     /// null or absent as an empty token. Both fail verification.
@@ -176,6 +178,60 @@ pub struct PrepareParams {
     /// Strict nonlocal provenance. Repository-derived fields are computed by
     /// BulletGit and cannot be supplied here.
     pub provenance: CandidateProvenance,
+}
+
+/// Eight caller-supplied ProofRoot leaves. Absent leaves bind as empty.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProofInputParams {
+    /// Scope grant and actual write set.
+    #[serde(default)]
+    pub scope_and_write_set: String,
+    /// Runner and sandbox attestation.
+    #[serde(default)]
+    pub runner_and_sandbox: String,
+    /// Toolchain and dependency manifests.
+    #[serde(default)]
+    pub toolchain_and_deps: String,
+    /// Deterministic Evidence.
+    #[serde(default)]
+    pub evidence: String,
+    /// Independent verifier Evidence.
+    #[serde(default)]
+    pub verifier_evidence: String,
+    /// Reviews and independence calculation.
+    #[serde(default)]
+    pub reviews: String,
+    /// Policy decision.
+    #[serde(default)]
+    pub policy: String,
+    /// Human approvals and Effect receipts.
+    #[serde(default)]
+    pub approvals_and_effect_receipts: String,
+}
+
+/// `bind_proof` parameters. Pure function over an exact Candidate.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindProofParams {
+    /// Exact Candidate identity subject.
+    pub candidate: Candidate,
+    /// Optional eight leaves. Empty still binds the Candidate.
+    #[serde(default)]
+    pub inputs: ProofInputParams,
+}
+
+/// `verify_proof_root` parameters. Recomputes on read.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyProofParams {
+    /// Previously bound root.
+    pub root: ProofRoot,
+    /// Exact Candidate identity subject.
+    pub candidate: Candidate,
+    /// The eight leaves that must recompute to `root`.
+    #[serde(default)]
+    pub inputs: ProofInputParams,
 }
 
 /// `preserve` parameters.

@@ -4,10 +4,13 @@
 use crate::authority_gateway::{AuthorityGateway, GatewayError, MutationPermit, PendingMutation};
 use crate::mutation_ledger::{MutationOperation, MutationOutcome};
 use crate::protocol::{
-    self, ApplyParams, ApplyProposalParams, CleanupParams, CloneParams, PatchParam, PrepareParams,
-    PreserveParams, Request,
+    self, ApplyParams, ApplyProposalParams, BindProofParams, CleanupParams, CloneParams,
+    PatchParam, PrepareParams, PreserveParams, ProofInputParams, Request, VerifyProofParams,
 };
-use bullet_git_types::{framed_digest, AuthorityError, Digest, WireAuthorityToken};
+use bullet_git_types::{
+    framed_digest, verify_proof_root, AuthorityError, Digest, ProofInputs, ProofRoot,
+    WireAuthorityToken,
+};
 use bullet_git_workspace::{
     AgentRepository, CapabilityError, CloneRequest, CommitIdentity, ExpectedAuthority, PatchHunk,
     PreservationAuthority, PrivateClone, RealRepository, ScopeGrant, MAX_CONTENT_BYTES,
@@ -38,6 +41,19 @@ fn not_cloned() -> MethodError {
 fn parse_params<T: DeserializeOwned>(params: &Value) -> Result<T, MethodError> {
     serde_json::from_value(params.clone())
         .map_err(|err| ("BAD_REQUEST".into(), format!("invalid params: {err}")))
+}
+
+fn proof_inputs(params: &ProofInputParams) -> ProofInputs<'_> {
+    ProofInputs {
+        scope_and_write_set: params.scope_and_write_set.as_bytes(),
+        runner_and_sandbox: params.runner_and_sandbox.as_bytes(),
+        toolchain_and_deps: params.toolchain_and_deps.as_bytes(),
+        evidence: params.evidence.as_bytes(),
+        verifier_evidence: params.verifier_evidence.as_bytes(),
+        reviews: params.reviews.as_bytes(),
+        policy: params.policy.as_bytes(),
+        approvals_and_effect_receipts: params.approvals_and_effect_receipts.as_bytes(),
+    }
 }
 
 fn to_value<T: serde::Serialize>(value: &T) -> MethodResult {
@@ -172,6 +188,8 @@ impl Daemon {
             | "prepare_candidate" => self.handle_repo(req),
             "preserve" => self.handle_preserve(req),
             "cleanup" => self.handle_cleanup(req),
+            "bind_proof" => self.handle_bind_proof(req),
+            "verify_proof_root" => self.handle_verify_proof_root(req),
             other => Err(("UNKNOWN_METHOD".into(), format!("unknown method: {other}"))),
         }
     }
@@ -440,6 +458,20 @@ impl Daemon {
             }
             other => Err(("UNKNOWN_METHOD".into(), format!("unknown method: {other}"))),
         }
+    }
+
+    fn handle_bind_proof(&self, req: &Request) -> MethodResult {
+        let params: BindProofParams = parse_params(&req.params)?;
+        let inputs = proof_inputs(&params.inputs);
+        to_value(&ProofRoot::bind(&params.candidate, &inputs))
+    }
+
+    fn handle_verify_proof_root(&self, req: &Request) -> MethodResult {
+        let params: VerifyProofParams = parse_params(&req.params)?;
+        let inputs = proof_inputs(&params.inputs);
+        verify_proof_root(&params.root, &params.candidate, &inputs)
+            .map_err(|error| (error.reason_code().to_string(), error.to_string()))?;
+        Ok(json!({"verified": true}))
     }
 
     fn handle_preserve(&mut self, req: &Request) -> MethodResult {
