@@ -5,9 +5,12 @@
 //! destination is byte-identical and later mirror GC cannot reach it.
 
 use crate::{io_err, CapabilityError};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::process::Command;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
 
 /// Which copy path produced the destination tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,11 +32,12 @@ pub fn copy_tree_prefers_reflink(
     destination: &Path,
 ) -> Result<CopyMode, CapabilityError> {
     require_copy_pair(source, destination)?;
-    if try_reflink(source, destination)? {
-        return Ok(CopyMode::Reflink);
-    }
-    copy_tree_byte_identical(source, destination)?;
-    Ok(CopyMode::Fallback)
+    let summary = copy_with_cleanup(source, destination, true)?;
+    Ok(if summary.files > 0 && summary.all_reflink {
+        CopyMode::Reflink
+    } else {
+        CopyMode::Fallback
+    })
 }
 
 /// Walk-copy regular files and directories so destination bytes equal source.
@@ -43,7 +47,7 @@ pub fn copy_tree_prefers_reflink(
 /// `IO_FAILED` on a missing source, existing destination, symlink, or special.
 pub fn copy_tree_byte_identical(source: &Path, destination: &Path) -> Result<(), CapabilityError> {
     require_copy_pair(source, destination)?;
-    copy_entries(source, destination)
+    copy_with_cleanup(source, destination, false).map(|_| ())
 }
 
 fn require_copy_pair(source: &Path, destination: &Path) -> Result<(), CapabilityError> {
@@ -64,25 +68,43 @@ fn require_copy_pair(source: &Path, destination: &Path) -> Result<(), Capability
     Ok(())
 }
 
-fn try_reflink(source: &Path, destination: &Path) -> Result<bool, CapabilityError> {
-    let status = Command::new("cp")
-        .args(["-a", "--reflink=always"])
-        .arg(source)
-        .arg(destination)
-        .status()
-        .map_err(|err| io_err("spawn cp --reflink=always", &err))?;
-    if status.success() {
-        return Ok(true);
-    }
-    if destination.exists() {
-        fs::remove_dir_all(destination)
-            .map_err(|err| io_err("remove failed reflink dest", &err))?;
-    }
-    Ok(false)
+#[derive(Clone, Copy, Debug)]
+struct CopySummary {
+    files: u64,
+    all_reflink: bool,
 }
 
-fn copy_entries(source: &Path, destination: &Path) -> Result<(), CapabilityError> {
+fn copy_with_cleanup(
+    source: &Path,
+    destination: &Path,
+    prefer_reflink: bool,
+) -> Result<CopySummary, CapabilityError> {
+    match copy_entries(source, destination, prefer_reflink) {
+        Ok(summary) => Ok(summary),
+        Err(error) => {
+            if destination.exists() {
+                fs::remove_dir_all(destination)
+                    .map_err(|cleanup| io_err("remove failed copy destination", &cleanup))?;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn copy_entries(
+    source: &Path,
+    destination: &Path,
+    prefer_reflink: bool,
+) -> Result<CopySummary, CapabilityError> {
+    let source_metadata =
+        fs::symlink_metadata(source).map_err(|err| io_err("inspect copy directory", &err))?;
     fs::create_dir(destination).map_err(|err| io_err("create fallback directory", &err))?;
+    fs::set_permissions(destination, source_metadata.permissions())
+        .map_err(|err| io_err("set copy directory permissions", &err))?;
+    let mut summary = CopySummary {
+        files: 0,
+        all_reflink: true,
+    };
     for entry in fs::read_dir(source).map_err(|err| io_err("read copy source", &err))? {
         let entry = entry.map_err(|err| io_err("read copy entry", &err))?;
         let from = entry.path();
@@ -91,9 +113,15 @@ fn copy_entries(source: &Path, destination: &Path) -> Result<(), CapabilityError
             fs::symlink_metadata(&from).map_err(|err| io_err("inspect copy entry", &err))?;
         let file_type = metadata.file_type();
         if file_type.is_dir() {
-            copy_entries(&from, &to)?;
+            let nested = copy_entries(&from, &to, prefer_reflink)?;
+            summary.files = summary.files.saturating_add(nested.files);
+            summary.all_reflink &= nested.all_reflink;
         } else if file_type.is_file() {
-            fs::copy(&from, &to).map_err(|err| io_err("copy fallback file", &err))?;
+            summary.files = summary.files.saturating_add(1);
+            let reflinked = copy_regular_file(&from, &to, &metadata, prefer_reflink)?;
+            if !reflinked {
+                summary.all_reflink = false;
+            }
         } else {
             return Err(CapabilityError::Io(format!(
                 "special filesystem entry is forbidden in fallback copy: {}",
@@ -101,5 +129,88 @@ fn copy_entries(source: &Path, destination: &Path) -> Result<(), CapabilityError
             )));
         }
     }
-    Ok(())
+    Ok(summary)
+}
+
+fn copy_regular_file(
+    source: &Path,
+    destination: &Path,
+    path_metadata: &fs::Metadata,
+    prefer_reflink: bool,
+) -> Result<bool, CapabilityError> {
+    let mut source_file = File::open(source).map_err(|err| io_err("open copy source", &err))?;
+    let opened_metadata = source_file
+        .metadata()
+        .map_err(|err| io_err("inspect opened copy source", &err))?;
+    if !opened_metadata.file_type().is_file()
+        || !same_file_identity(path_metadata, &opened_metadata)
+    {
+        return Err(CapabilityError::Io(format!(
+            "copy source changed during admission: {}",
+            source.display()
+        )));
+    }
+    let mut destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|err| io_err("create copy destination", &err))?;
+
+    #[cfg(target_os = "linux")]
+    if prefer_reflink && rustix::fs::ioctl_ficlone(&destination_file, &source_file).is_ok() {
+        destination_file
+            .set_permissions(path_metadata.permissions())
+            .map_err(|err| io_err("set reflink permissions", &err))?;
+        return Ok(true);
+    }
+
+    let _ = prefer_reflink;
+    destination_file
+        .set_len(0)
+        .map_err(|err| io_err("reset copy destination", &err))?;
+    source_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|err| io_err("seek copy source", &err))?;
+    destination_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|err| io_err("seek copy destination", &err))?;
+    copy_bounded(
+        &mut source_file,
+        &mut destination_file,
+        opened_metadata.len(),
+    )?;
+    destination_file
+        .set_permissions(path_metadata.permissions())
+        .map_err(|err| io_err("set copy permissions", &err))?;
+    Ok(false)
+}
+
+fn copy_bounded(
+    source: &mut File,
+    destination: &mut File,
+    expected_len: u64,
+) -> Result<(), CapabilityError> {
+    let copied = std::io::copy(
+        &mut source.take(expected_len.saturating_add(1)),
+        destination,
+    )
+    .map_err(|err| io_err("copy regular file", &err))?;
+    if copied != expected_len {
+        return Err(CapabilityError::Io(
+            "copy source length changed during read".into(),
+        ));
+    }
+    destination
+        .flush()
+        .map_err(|err| io_err("flush copy destination", &err))
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.dev() == right.dev() && left.ino() == right.ino() && left.len() == right.len()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
 }

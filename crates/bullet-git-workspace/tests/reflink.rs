@@ -3,6 +3,7 @@
 use bullet_git_workspace::{copy_tree_byte_identical, copy_tree_prefers_reflink, CopyMode};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 #[test]
 fn fallback_copy_is_byte_identical() {
@@ -41,6 +42,52 @@ fn existing_destination_is_refused() {
             .reason_code(),
         "IO_FAILED"
     );
+}
+
+#[test]
+fn ambient_cp_is_never_part_of_the_copy_authority() {
+    const CHILD_FLAG: &str = "BULLET_REFLINK_HOSTILE_CP_CHILD";
+    if std::env::var_os(CHILD_FLAG).is_some() {
+        let source = std::env::var_os("BULLET_REFLINK_SOURCE").expect("source");
+        let destination = std::env::var_os("BULLET_REFLINK_DESTINATION").expect("destination");
+        copy_tree_prefers_reflink(Path::new(&source), Path::new(&destination)).expect("copy");
+        return;
+    }
+
+    let root = private_tempdir();
+    let source = root.path().join("source");
+    write_fixture_tree(&source);
+    let destination = root.path().join("copy");
+    let hostile_bin = root.path().join("hostile-bin");
+    fs::create_dir(&hostile_bin).expect("hostile bin");
+    let marker = root.path().join("ambient-cp-ran");
+    let cp = hostile_bin.join("cp");
+    fs::write(
+        &cp,
+        format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+    )
+    .expect("cp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&cp, fs::Permissions::from_mode(0o700)).expect("chmod cp");
+    }
+
+    let output = Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", "ambient_cp_is_never_part_of_the_copy_authority"])
+        .env(CHILD_FLAG, "1")
+        .env("BULLET_REFLINK_SOURCE", &source)
+        .env("BULLET_REFLINK_DESTINATION", &destination)
+        .env("PATH", &hostile_bin)
+        .output()
+        .expect("child test");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!marker.exists(), "ambient cp must not execute");
+    assert_trees_equal(&source, &destination);
 }
 
 fn write_fixture_tree(root: &Path) {
