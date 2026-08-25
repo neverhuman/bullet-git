@@ -55,6 +55,9 @@ protocol, refs, and protected updates belong to the forge (Jeryu/GitHub).
   positive test checker may stand in for it.
 - Zero new worktrees anywhere: the daemon refuses a `.git` file as
   `WORKTREE_FORBIDDEN`, and agents edit only the claimed canonical checkout.
+- Jeryu tags observed today are not annotated signed tags. `bullet-family
+  forge pin` refuses `UNSIGNED_FORGE_TAG` until they are (J-5 / OD-D). Do not
+  write "signed Jeryu tags" as a current fact.
 
 ## Required Local Check
 

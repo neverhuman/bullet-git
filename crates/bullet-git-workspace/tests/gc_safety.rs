@@ -6,7 +6,11 @@
 
 mod support;
 
-use bullet_git_workspace::{mirror_dir, CapabilityError, FileProtocol, PrivateClone};
+use bullet_git_types::{GitOid, GitOidAlgorithm};
+use bullet_git_workspace::{
+    mirror_dir, pin_retained_object, retention_ref_exists, CapabilityError, FileProtocol,
+    PrivateClone, RetentionClass, RetentionPin,
+};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -286,4 +290,74 @@ fn gc_loop_concurrent_with_clone_creation_and_workspace_commits_corrupts_nothing
         checkout_and_commit(workspace, "after_load");
         assert_clone_intact(workspace, &base);
     }
+}
+
+#[test]
+fn tombstoned_objects_survive_gc_prune_now() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("fixture-home");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, "atm_gc_tombstone");
+    let repo = workspace.repo_dir();
+    let git = workspace.git();
+
+    let keep = write_dangling_blob(git, repo, "tombstone-keep.bin", b"tombstone-payload");
+    let drop = write_dangling_blob(git, repo, "eligible-drop.bin", b"eligible-payload");
+    let pin = RetentionPin {
+        oid: GitOid::from_hex(GitOidAlgorithm::Sha1, keep.clone()).expect("oid"),
+        class: RetentionClass::Tombstoned,
+    };
+    assert!(!RetentionClass::Tombstoned.may_prune());
+    assert!(RetentionClass::Eligible.may_prune());
+    pin_retained_object(git, repo, &pin).expect("pin tombstone");
+    assert!(retention_ref_exists(git, repo, &pin).expect("retain ref"));
+    assert_eq!(
+        pin_retained_object(
+            git,
+            repo,
+            &RetentionPin {
+                oid: GitOid::from_hex(GitOidAlgorithm::Sha1, drop.clone()).expect("oid"),
+                class: RetentionClass::Eligible,
+            },
+        )
+        .expect_err("eligible")
+        .reason_code(),
+        "IO_FAILED"
+    );
+
+    gc_prune_now(&home, repo).expect("hostile gc on the private clone");
+
+    git.run(
+        Some(repo),
+        FileProtocol::Never,
+        &["cat-file", "-e", &keep],
+        &[],
+    )
+    .expect("tombstoned object must survive prune");
+    assert!(
+        !git.probe(Some(repo), &["cat-file", "-e", &drop])
+            .expect("probe eligible"),
+        "unpinned dangling object should be pruned"
+    );
+}
+
+fn write_dangling_blob(
+    git: &bullet_git_workspace::SafeGit,
+    repo: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> String {
+    let path = repo.join(name);
+    std::fs::write(&path, bytes).expect("blob file");
+    let hex = git
+        .run(
+            Some(repo),
+            FileProtocol::Never,
+            &["hash-object", "-w", name],
+            &[],
+        )
+        .expect("hash-object")
+        .text();
+    std::fs::remove_file(&path).expect("unlink working-tree copy");
+    hex
 }
