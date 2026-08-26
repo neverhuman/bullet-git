@@ -79,10 +79,34 @@ fn bind_proof_and_verify_are_reachable_without_a_session() {
     let verified = rpc(
         &mut daemon,
         "verify_proof_root",
-        json!({"root": root, "candidate": candidate, "inputs": inputs}),
+        json!({"root": root.clone(), "candidate": candidate.clone(), "inputs": inputs.clone()}),
     );
     assert!(verified.get("err").is_none(), "{verified}");
     assert_eq!(verified["ok"]["verified"], true);
+
+    let mut wrong_candidate_id = candidate.clone();
+    wrong_candidate_id.id = repeated_id("can", 'f');
+    let bind_refused = rpc(
+        &mut daemon,
+        "bind_proof",
+        json!({"candidate": wrong_candidate_id, "inputs": inputs.clone()}),
+    );
+    assert_eq!(
+        bind_refused["err"]["code"], "CANDIDATE_ID_MISMATCH",
+        "{bind_refused}"
+    );
+
+    let mut wrong_content_id = candidate;
+    wrong_content_id.content_id = repeated_id("cnt", 'f');
+    let verify_refused = rpc(
+        &mut daemon,
+        "verify_proof_root",
+        json!({"root": root, "candidate": wrong_content_id, "inputs": inputs}),
+    );
+    assert_eq!(
+        verify_refused["err"]["code"], "CONTENT_ID_MISMATCH",
+        "{verify_refused}"
+    );
 }
 
 #[test]

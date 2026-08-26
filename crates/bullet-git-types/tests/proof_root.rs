@@ -1,8 +1,8 @@
 //! Eight-leaf ProofRoot bind, verify-on-read, and one tamper per input.
 
 use bullet_git_types::{
-    verify_proof_root, Candidate, CandidateManifest, Digest, GitOid, ProofInputs, ProofRoot,
-    RepoPath, CANDIDATE_MANIFEST_SCHEMA_VERSION,
+    verify_proof_root, Candidate, CandidateManifest, CandidateManifestError, Digest, GitOid,
+    ProofInputs, ProofRoot, RepoPath, CANDIDATE_MANIFEST_SCHEMA_VERSION,
 };
 use std::str::FromStr;
 
@@ -59,6 +59,26 @@ fn populated_inputs() -> ProofInputs<'static> {
 #[test]
 fn proof_root_bind_is_stable_and_verify_accepts_the_same_inputs() {
     let candidate = candidate();
+    candidate.validate_identity().expect("valid identity");
+
+    let mut wrong_candidate_id = candidate.clone();
+    wrong_candidate_id.id = repeated_id("can", 'f');
+    assert_eq!(
+        wrong_candidate_id
+            .validate_identity()
+            .expect_err("stored Candidate id mismatch"),
+        CandidateManifestError::CandidateIdMismatch
+    );
+
+    let mut wrong_content_id = candidate.clone();
+    wrong_content_id.content_id = repeated_id("cnt", 'f');
+    assert_eq!(
+        wrong_content_id
+            .validate_identity()
+            .expect_err("stored content id mismatch"),
+        CandidateManifestError::ContentIdMismatch
+    );
+
     let inputs = populated_inputs();
     let root = ProofRoot::bind(&candidate, &inputs);
     assert_eq!(root.candidate, candidate.id);

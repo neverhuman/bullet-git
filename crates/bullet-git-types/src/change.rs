@@ -266,6 +266,12 @@ pub enum CandidateManifestError {
     /// An observed path was outside the exact grant.
     #[error("actual path {0} is outside the granted scope")]
     ActualScopeExceedsGrant(String),
+    /// Stored provenance identity differs from the manifest-derived identity.
+    #[error("stored Candidate id does not match the manifest-derived id")]
+    CandidateIdMismatch,
+    /// Stored content identity differs from the manifest-derived identity.
+    #[error("stored Candidate content id does not match the manifest-derived id")]
+    ContentIdMismatch,
     /// RFC 8785 encoding failed.
     #[error("canonical Candidate encoding failed: {0}")]
     CanonicalJson(String),
@@ -279,6 +285,8 @@ impl CandidateManifestError {
             Self::UnsupportedSchema(_) => "UNSUPPORTED_SCHEMA",
             Self::InvalidFence => "INVALID_FENCE",
             Self::ActualScopeExceedsGrant(_) => "ACTUAL_SCOPE_EXCEEDS_GRANT",
+            Self::CandidateIdMismatch => "CANDIDATE_ID_MISMATCH",
+            Self::ContentIdMismatch => "CONTENT_ID_MISMATCH",
             Self::CanonicalJson(_) => "CANONICAL_JSON_FAILED",
         }
     }
@@ -316,6 +324,24 @@ impl Candidate {
             manifest,
             prepared_at,
         })
+    }
+
+    /// Recompute both stored addresses from the exact manifest.
+    ///
+    /// This must run after deserialization and before a Candidate becomes a
+    /// proof subject. It also re-applies the manifest's semantic validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed manifest or stored-identity refusal.
+    pub fn validate_identity(&self) -> Result<(), CandidateManifestError> {
+        if self.id != self.manifest.candidate_id()? {
+            return Err(CandidateManifestError::CandidateIdMismatch);
+        }
+        if self.content_id != self.manifest.content_id()? {
+            return Err(CandidateManifestError::ContentIdMismatch);
+        }
+        Ok(())
     }
 }
 

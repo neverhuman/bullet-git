@@ -8,8 +8,8 @@ use crate::protocol::{
     PatchParam, PrepareParams, PreserveParams, ProofInputParams, Request, VerifyProofParams,
 };
 use bullet_git_types::{
-    framed_digest, verify_proof_root, AuthorityError, Digest, ProofInputs, ProofRoot,
-    WireAuthorityToken,
+    framed_digest, verify_proof_root, AuthorityError, CandidateManifestError, Digest, ProofInputs,
+    ProofRoot, WireAuthorityToken,
 };
 use bullet_git_workspace::{
     AgentRepository, CapabilityError, CloneRequest, CommitIdentity, ExpectedAuthority, PatchHunk,
@@ -27,6 +27,10 @@ fn cap(err: &CapabilityError) -> MethodError {
 }
 
 fn auth(err: &AuthorityError) -> MethodError {
+    (err.reason_code().to_string(), err.to_string())
+}
+
+fn candidate_manifest(err: &CandidateManifestError) -> MethodError {
     (err.reason_code().to_string(), err.to_string())
 }
 
@@ -462,12 +466,20 @@ impl Daemon {
 
     fn handle_bind_proof(&self, req: &Request) -> MethodResult {
         let params: BindProofParams = parse_params(&req.params)?;
+        params
+            .candidate
+            .validate_identity()
+            .map_err(|error| candidate_manifest(&error))?;
         let inputs = proof_inputs(&params.inputs);
         to_value(&ProofRoot::bind(&params.candidate, &inputs))
     }
 
     fn handle_verify_proof_root(&self, req: &Request) -> MethodResult {
         let params: VerifyProofParams = parse_params(&req.params)?;
+        params
+            .candidate
+            .validate_identity()
+            .map_err(|error| candidate_manifest(&error))?;
         let inputs = proof_inputs(&params.inputs);
         verify_proof_root(&params.root, &params.candidate, &inputs)
             .map_err(|error| (error.reason_code().to_string(), error.to_string()))?;
