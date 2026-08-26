@@ -2,7 +2,7 @@
 
 Status: first-build BulletGit kernel; component primitives, not release-ready
 Owner: Bullet Farm maintainers
-Last reviewed: 2026-08-25
+Last reviewed: 2026-08-26
 Applies to: bullet-git
 
 ## Role
@@ -29,8 +29,10 @@ protocol, refs, and protected updates belong to the forge (Jeryu/GitHub).
 
 - Initial source authority: Jeryu repository `root/bullet-git`
   (`repos.manifest.toml`, family root)
-- Public GitHub mirror: manifest slug `neverhuman/bullet-git`; not configured
-  as a publication remote and never source authority
+- Public GitHub index: `https://github.com/neverhuman/bulletfarm` (hub only;
+  not `neverhuman/bullet-farm` and not a `neverhuman/bullet-git` mirror); this
+  member has no separate GitHub publication remote and is never source
+  authority
 - Family lock entry: `bullet-git` at tag `v0.1.0-alpha.4` in
   `bullet-farm/family.lock`; no newer BulletGit tag is published
 
