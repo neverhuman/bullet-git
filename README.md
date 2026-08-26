@@ -18,9 +18,10 @@ See `docs/architecture.md` for the daemon protocol and trust model.
 ## Quick start
 
 ```bash
-just setup
 just fast
 ```
+
+Run `just setup` once only if this checkout has not had dependencies prepared.
 
 ## Readiness
 
