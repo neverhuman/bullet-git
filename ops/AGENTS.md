@@ -56,9 +56,13 @@ credentials, permissions are `contents: read`, and no cache is configured.
 coverage, plus `macos-15`/`windows-2025` compile and the existing production
 daemon test that asserts `AUTHORITY_CONTRACT_UNAVAILABLE` before clone I/O.
 Linux remains the only required mutation-capable platform. `ci.toml` describes
-the same local lane graph but is inert: its required job returns exit 78 with
-`JERYU_STATUS_BINDING_UNRATIFIED` until predecessor-result binding, runners,
-and checks are ratified with forge/public-mirror API read-back.
+the same local lane graph but is prepared and inert: every job invokes the
+activation gate first and returns exit 78 with `JERYU_CI_NOT_RATIFIED` until
+source-forge topology, immutable subjects, runners, the protected context, and
+API read-back are ratified. Only after that first stage is separately ratified
+may dispatch reach the preserved required-job refusal
+`JERYU_STATUS_BINDING_UNRATIFIED`, which remains exit 78 until exact
+predecessor-result binding is ratified and read back.
 
 ## `BULLET_LIVE_GITD` and the nightly lane
 
