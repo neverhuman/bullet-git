@@ -5,7 +5,7 @@ use bullet_git_types::{
     AuthorityEnvelope, Candidate, CandidateProvenance, Change, PatchProposal, ProofRoot,
     MAX_AGGREGATE_CONTENT_BYTES,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::io::BufRead;
 use thiserror::Error;
@@ -197,33 +197,44 @@ pub struct PrepareParams {
     pub provenance: CandidateProvenance,
 }
 
-/// Eight caller-supplied ProofRoot leaves. Absent leaves bind as empty.
-#[derive(Clone, Debug, Default, Deserialize)]
+fn nonempty_proof_input<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Err(serde::de::Error::custom("proof input must not be empty"));
+    }
+    Ok(value)
+}
+
+/// Eight mandatory caller-supplied ProofRoot leaves.
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProofInputParams {
     /// Scope grant and actual write set.
-    #[serde(default)]
+    #[serde(deserialize_with = "nonempty_proof_input")]
     pub scope_and_write_set: String,
     /// Runner and sandbox attestation.
-    #[serde(default)]
+    #[serde(deserialize_with = "nonempty_proof_input")]
     pub runner_and_sandbox: String,
     /// Toolchain and dependency manifests.
-    #[serde(default)]
+    #[serde(deserialize_with = "nonempty_proof_input")]
     pub toolchain_and_deps: String,
     /// Deterministic Evidence.
-    #[serde(default)]
+    #[serde(deserialize_with = "nonempty_proof_input")]
     pub evidence: String,
     /// Independent verifier Evidence.
-    #[serde(default)]
+    #[serde(deserialize_with = "nonempty_proof_input")]
     pub verifier_evidence: String,
     /// Reviews and independence calculation.
-    #[serde(default)]
+    #[serde(deserialize_with = "nonempty_proof_input")]
     pub reviews: String,
     /// Policy decision.
-    #[serde(default)]
+    #[serde(deserialize_with = "nonempty_proof_input")]
     pub policy: String,
     /// Human approvals and Effect receipts.
-    #[serde(default)]
+    #[serde(deserialize_with = "nonempty_proof_input")]
     pub approvals_and_effect_receipts: String,
 }
 
@@ -233,8 +244,7 @@ pub struct ProofInputParams {
 pub struct BindProofParams {
     /// Exact Candidate identity subject.
     pub candidate: Candidate,
-    /// Optional eight leaves. Empty still binds the Candidate.
-    #[serde(default)]
+    /// Complete nonempty eight-leaf proof subject.
     pub inputs: ProofInputParams,
 }
 
@@ -246,8 +256,7 @@ pub struct VerifyProofParams {
     pub root: ProofRoot,
     /// Exact Candidate identity subject.
     pub candidate: Candidate,
-    /// The eight leaves that must recompute to `root`.
-    #[serde(default)]
+    /// The complete nonempty eight leaves that must recompute to `root`.
     pub inputs: ProofInputParams,
 }
 

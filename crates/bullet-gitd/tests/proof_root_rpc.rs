@@ -129,3 +129,59 @@ fn verify_proof_root_refuses_a_tampered_leaf() {
     );
     assert_eq!(refused["err"]["code"], "PROOF_ROOT_MISMATCH", "{refused}");
 }
+
+#[test]
+fn proof_rpc_requires_every_nonempty_leaf_and_rejects_unknown_fields() {
+    let mut daemon = Daemon::new();
+    let candidate = candidate();
+    let complete = eight_inputs();
+    let fields = [
+        "scope_and_write_set",
+        "runner_and_sandbox",
+        "toolchain_and_deps",
+        "evidence",
+        "verifier_evidence",
+        "reviews",
+        "policy",
+        "approvals_and_effect_receipts",
+    ];
+
+    let omitted_object = rpc(
+        &mut daemon,
+        "bind_proof",
+        json!({"candidate": candidate.clone()}),
+    );
+    assert_eq!(omitted_object["err"]["code"], "BAD_REQUEST");
+
+    for field in fields {
+        let mut missing = complete.clone();
+        missing
+            .as_object_mut()
+            .expect("proof inputs object")
+            .remove(field);
+        let missing_response = rpc(
+            &mut daemon,
+            "bind_proof",
+            json!({"candidate": candidate.clone(), "inputs": missing}),
+        );
+        assert_eq!(missing_response["err"]["code"], "BAD_REQUEST", "{field}");
+
+        let mut empty = complete.clone();
+        empty[field] = json!("");
+        let empty_response = rpc(
+            &mut daemon,
+            "verify_proof_root",
+            json!({"root": {"candidate": candidate.id, "root": "00".repeat(32)}, "candidate": candidate.clone(), "inputs": empty}),
+        );
+        assert_eq!(empty_response["err"]["code"], "BAD_REQUEST", "{field}");
+    }
+
+    let mut unknown = complete;
+    unknown["caller_selected_outcome"] = json!("pass");
+    let unknown_response = rpc(
+        &mut daemon,
+        "bind_proof",
+        json!({"candidate": candidate, "inputs": unknown}),
+    );
+    assert_eq!(unknown_response["err"]["code"], "BAD_REQUEST");
+}
