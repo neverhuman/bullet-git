@@ -4,6 +4,27 @@ use std::{fs, path::Path, process::Command};
 
 use crate::{io_err, CapabilityError};
 
+/// Inspect a repository-local Git config through the fuzz harness's isolated
+/// `git config --file` subprocess.
+///
+/// # Errors
+///
+/// `HOSTILE_GIT_CONFIG` when the config is malformed, non-regular, unreadable,
+/// or contains a forbidden key.
+#[cfg(feature = "fuzzing")]
+pub fn validate_repo_config(repo: &Path) -> Result<(), CapabilityError> {
+    let mut command = Command::new("git");
+    command.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("LC_ALL", "C");
+    validate(repo, command)
+}
+
 pub(crate) fn validate(repo: &Path, mut command: Command) -> Result<(), CapabilityError> {
     let config = local_config_path(repo)?;
     let Some(config) = config else {

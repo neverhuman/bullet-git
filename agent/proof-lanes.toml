@@ -23,13 +23,13 @@ requires_network = false
 [[lane]]
 name = "contract"
 command = "just contract"
-purpose = "126-case nonzero workspace/daemon partition including real Git and spawned-daemon suites"
+purpose = "126-case nonzero workspace/daemon partition plus six exact corpus-replay outcomes for patch and local-config oracles"
 requires_network = false
 
 [[lane]]
 name = "security"
 command = "just security"
-purpose = "secret-shaped canary plus cargo-deny licenses, advisories, bans, and sources with a fresh RustSec database"
+purpose = "secret-shaped canary plus cargo-deny licenses, advisories, bans, and sources for the workspace and corpus harness locks with a fresh RustSec database"
 requires_network = true
 
 [[lane]]

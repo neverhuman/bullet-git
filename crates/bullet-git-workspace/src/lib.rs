@@ -31,6 +31,8 @@ pub use cas::{cas_digest, CasError, CasPut, ImmutableCas, PutDisposition, MAX_CA
 pub use clone::{CloneRequest, PrivateClone, WorkspaceManifest};
 pub use gc::{pin_retained_object, retention_ref_exists, RetentionClass, RetentionPin};
 pub use generation::GenerationError;
+#[cfg(feature = "fuzzing")]
+pub use git_config::validate_repo_config;
 pub use lineage::WorkspaceLineage;
 pub use mirror::{mirror_dir, MirrorLock, LOCK_MAX_WAIT, LOCK_STALE_AFTER};
 pub use patch::{

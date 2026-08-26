@@ -12,4 +12,5 @@ if [[ -s .ci-artifacts/reports/contract.junit.xml ]]; then
   bash ops/ci/sanitize-junit.sh contract
 fi
 [[ "$status" -eq 0 ]] || exit "$status"
+bash ops/ci/fuzz.sh
 log "contract lane passed"

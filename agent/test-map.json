@@ -73,6 +73,10 @@
       "command": "cargo test -p bullet-git-workspace",
       "purpose": "prove SafeGit isolation, private clone lifecycle, scope enforcement, and receipt-gated cleanup against real Git fixtures"
     },
+    "crates/bullet-git-workspace/fuzz/": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "the required contract sub-step replays the six exact corpus outcomes; lint checks the standalone manifest with fmt and strict Clippy, and security audits its independent lock under deny.toml"
+    },
     "crates/bullet-gitd/": {
       "command": "cargo test -p bullet-gitd",
       "purpose": "prove unavailable authority prevents production mutation, private permits bind exact calls, durable replay fails closed, and stdio frames remain bounded"

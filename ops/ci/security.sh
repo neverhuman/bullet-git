@@ -14,4 +14,6 @@ require_tool git || exit 1
 bash ops/ci/secret-canary.sh
 bash ops/ci/advisory-db.sh
 cargo deny --locked check licenses advisories bans sources
+cargo deny --manifest-path crates/bullet-git-workspace/fuzz/Cargo.toml --locked \
+  check --config deny.toml licenses advisories bans sources
 log "security lane passed"

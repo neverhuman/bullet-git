@@ -12,6 +12,9 @@ bash ops/ci/aggregate-test.sh
 bash ops/ci/workflow-policy-test.sh
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo fmt --manifest-path crates/bullet-git-workspace/fuzz/Cargo.toml -- --check
+cargo clippy --locked --manifest-path crates/bullet-git-workspace/fuzz/Cargo.toml \
+  --all-targets -- -D warnings
 actionlint .github/workflows/*.yml
 zizmor --offline --no-ignores --strict-collection .
 find ops scripts tools -type f -name '*.sh' -print0 | xargs -0 shellcheck -x

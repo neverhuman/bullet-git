@@ -1,0 +1,14 @@
+[workspace]
+
+[package]
+name = "bullet-git-fuzz"
+description = "Standalone corpus replay for the patch applier and .git/config oracles."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+bullet-git-workspace = { path = "..", features = ["fuzzing"] }
+tempfile = "3"
