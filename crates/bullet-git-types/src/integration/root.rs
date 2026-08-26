@@ -2,9 +2,11 @@
 //! [`IntegrationManifest`] whose `proof_root` is derived from its Candidate
 //! roots. No root is ever minted from a hand-supplied `proof_root`.
 
-use super::{IntegrationError, IntegrationId, IntegrationManifest};
-use crate::change::ProofRoot;
-use crate::ids::GitOid;
+use super::{
+    CandidateBinding, ExecutionEnvelope, IntegrationError, IntegrationId, IntegrationManifest,
+};
+use crate::change::{Candidate, ProofRoot};
+use crate::ids::{GateId, GitOid};
 use crate::{frame, framed_digest, Digest};
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +52,33 @@ impl IntegrationInputs<'_> {
     }
 }
 
+/// One Candidate binding plus the independently admitted inputs that must
+/// reproduce it before an Integration root can be minted.
+#[derive(Clone, Copy, Debug)]
+pub struct CandidateBindingCheck<'a> {
+    /// Stored proof-carrying binding.
+    pub binding: &'a CandidateBinding,
+    /// Independently loaded Candidate subject.
+    pub candidate: &'a Candidate,
+    /// Independently recomputed Candidate proof root.
+    pub proof_root: &'a ProofRoot,
+    /// Independently admitted required gate set.
+    pub expected_gate_ids: &'a [GateId],
+    /// Independently admitted execution envelope.
+    pub expected_envelope: &'a ExecutionEnvelope,
+}
+
+impl CandidateBindingCheck<'_> {
+    pub(super) fn verify(&self) -> Result<(), IntegrationError> {
+        self.binding.verify(
+            self.candidate,
+            self.proof_root,
+            self.expected_gate_ids,
+            self.expected_envelope,
+        )
+    }
+}
+
 /// Merkle binding of integration claims to an exact integration subject.
 /// Distinct from [`ProofRoot`] in subject type, field name, and preimage
 /// domain; neither validates as the other.
@@ -64,7 +93,7 @@ pub struct IntegrationRoot {
 
 impl IntegrationRoot {
     /// Bind the manifest-derived tree plus the four caller leaves, after
-    /// proving `manifest.proof_root` is derived from `candidate_roots`.
+    /// proving the ordered Candidate roots and bindings match the manifest.
     ///
     /// # Errors
     ///
@@ -73,13 +102,18 @@ impl IntegrationRoot {
     pub fn bind(
         manifest: &IntegrationManifest,
         candidate_roots: &[ProofRoot],
+        candidate_checks: &[CandidateBindingCheck<'_>],
         inputs: &IntegrationInputs<'_>,
     ) -> Result<Self, IntegrationError> {
         let subject = manifest.integration_id()?;
-        manifest.verify_proof_root(candidate_roots)?;
+        manifest.verify_bindings(candidate_roots, candidate_checks)?;
         let mut candidates = Vec::new();
         for id in &manifest.candidate_ids {
             frame(&mut candidates, id.as_str().as_bytes());
+        }
+        let mut bindings = Vec::new();
+        for id in &manifest.binding_ids {
+            frame(&mut bindings, id.as_str().as_bytes());
         }
         let merge_group = manifest.merge_group_sha.as_ref().map_or("", GitOid::as_str);
         let root = framed_digest(&[
@@ -88,6 +122,7 @@ impl IntegrationRoot {
             manifest.target_ref.as_bytes(),
             manifest.target_sha.as_str().as_bytes(),
             &candidates,
+            &bindings,
             merge_group.as_bytes(),
             manifest.proof_root.as_bytes(),
             manifest.policy_snapshot_id.as_str().as_bytes(),
@@ -110,9 +145,10 @@ impl IntegrationRoot {
         &self,
         manifest: &IntegrationManifest,
         candidate_roots: &[ProofRoot],
+        candidate_checks: &[CandidateBindingCheck<'_>],
         inputs: &IntegrationInputs<'_>,
     ) -> Result<(), IntegrationError> {
-        if self != &Self::bind(manifest, candidate_roots, inputs)? {
+        if self != &Self::bind(manifest, candidate_roots, candidate_checks, inputs)? {
             return Err(IntegrationError::IntegrationRootMismatch);
         }
         Ok(())

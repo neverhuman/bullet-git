@@ -8,7 +8,7 @@ mod root;
 use crate::change::{hash_canonical, Candidate, CandidateManifestError, ProofRoot};
 use crate::ids::{CandidateId, ContentId, GateId, GitOid};
 use crate::{Digest, TypesError};
-pub use root::{combined_proof_root, IntegrationInputs, IntegrationRoot};
+pub use root::{combined_proof_root, CandidateBindingCheck, IntegrationInputs, IntegrationRoot};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
@@ -177,17 +177,23 @@ impl CandidateBinding {
         Ok(binding)
     }
 
-    /// Recompute the binding from the exact Candidate and root on read.
+    /// Recompute the binding from independently admitted inputs on read.
     ///
     /// # Errors
     ///
     /// `BINDING_MISMATCH` when a stored field differs from the recomputation.
-    pub fn verify(&self, candidate: &Candidate, root: &ProofRoot) -> Result<(), IntegrationError> {
+    pub fn verify(
+        &self,
+        candidate: &Candidate,
+        root: &ProofRoot,
+        expected_gate_ids: &[GateId],
+        expected_envelope: &ExecutionEnvelope,
+    ) -> Result<(), IntegrationError> {
         let expected = Self::bind(
             candidate,
             root,
-            self.gate_ids.clone(),
-            self.envelope.clone(),
+            expected_gate_ids.to_vec(),
+            expected_envelope.clone(),
         )?;
         if *self != expected {
             return Err(IntegrationError::BindingMismatch);
@@ -232,6 +238,8 @@ pub struct IntegrationManifest {
     pub target_sha: GitOid,
     /// Candidates in landing order. Order is identity.
     pub candidate_ids: Vec<CandidateId>,
+    /// Proof-carrying Candidate bindings in the same landing order.
+    pub binding_ids: Vec<BindingId>,
     /// Composed merge-group head, when the forge discloses one.
     pub merge_group_sha: Option<GitOid>,
     /// Combined proof requirement; see [`combined_proof_root`].
@@ -261,6 +269,17 @@ impl IntegrationManifest {
         for id in &self.candidate_ids {
             if !seen.insert(id) {
                 return Err(IntegrationError::DuplicateCandidate(id.to_string()));
+            }
+        }
+        if self.binding_ids.len() != self.candidate_ids.len() {
+            return Err(IntegrationError::BindingSetMismatch(
+                "binding count differs from the candidate set",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for id in &self.binding_ids {
+            if !seen.insert(id) {
+                return Err(IntegrationError::DuplicateBinding(id.to_string()));
             }
         }
         if self.merge_group_sha.as_ref() == Some(&self.target_sha) {
@@ -310,6 +329,47 @@ impl IntegrationManifest {
         }
         Ok(())
     }
+
+    /// Verify ordered roots and independently checked binding identities.
+    /// # Errors
+    /// Typed refusal for any binding, set, or subject mismatch.
+    pub fn verify_bindings(
+        &self,
+        candidate_roots: &[ProofRoot],
+        candidate_checks: &[CandidateBindingCheck<'_>],
+    ) -> Result<(), IntegrationError> {
+        self.verify_proof_root(candidate_roots)?;
+        if candidate_checks.len() != self.binding_ids.len() {
+            return Err(IntegrationError::BindingSetMismatch(
+                "supplied binding count differs from the manifest",
+            ));
+        }
+        for ((candidate_id, root), (binding_id, check)) in self
+            .candidate_ids
+            .iter()
+            .zip(candidate_roots)
+            .zip(self.binding_ids.iter().zip(candidate_checks))
+        {
+            if check.proof_root != root {
+                return Err(IntegrationError::BindingSetMismatch(
+                    "checked proof root differs from the ordered Candidate root",
+                ));
+            }
+            check.verify()?;
+            let binding = check.binding;
+            if binding.candidate_id != *candidate_id || binding.proof_root != root.root {
+                return Err(IntegrationError::BindingSetMismatch(
+                    "binding does not name the corresponding Candidate proof root",
+                ));
+            }
+            if binding.binding_id()? != *binding_id {
+                return Err(IntegrationError::BindingSetMismatch(
+                    "binding identity differs from the ordered manifest identity",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Integration refusal with stable reason codes.
@@ -354,6 +414,12 @@ pub enum IntegrationError {
     /// A Candidate appears twice.
     #[error("candidate {0} appears more than once")]
     DuplicateCandidate(String),
+    /// Candidate and binding sets are not an ordered one-to-one match.
+    #[error("integration binding set does not match: {0}")]
+    BindingSetMismatch(&'static str),
+    /// A Candidate binding appears twice.
+    #[error("binding {0} appears more than once")]
+    DuplicateBinding(String),
     /// Merge-group head cannot be the untouched target.
     #[error("merge-group head equals the target SHA")]
     MergeGroupEqualsTarget,
@@ -383,6 +449,8 @@ impl IntegrationError {
             Self::EmptyCandidateSet => "EMPTY_CANDIDATE_SET",
             Self::CandidateSetTooLarge(_) => "CANDIDATE_SET_TOO_LARGE",
             Self::DuplicateCandidate(_) => "DUPLICATE_CANDIDATE_ID",
+            Self::BindingSetMismatch(_) => "BINDING_SET_MISMATCH",
+            Self::DuplicateBinding(_) => "DUPLICATE_BINDING_ID",
             Self::MergeGroupEqualsTarget => "MERGE_GROUP_EQUALS_TARGET",
             Self::ProofRootNotDerived(_) => "PROOF_ROOT_NOT_DERIVED",
             Self::IntegrationRootMismatch => "INTEGRATION_ROOT_MISMATCH",

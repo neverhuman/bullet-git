@@ -19,8 +19,8 @@ pub use ids::{
     GraphRevisionId, PlanRevisionId, RepositoryId, VariantId, WorkPackageId,
 };
 pub use integration::{
-    combined_proof_root, BindingId, CandidateBinding, ExecutionEnvelope, IntegrationError,
-    IntegrationId, IntegrationInputs, IntegrationManifest, IntegrationRoot,
+    combined_proof_root, BindingId, CandidateBinding, CandidateBindingCheck, ExecutionEnvelope,
+    IntegrationError, IntegrationId, IntegrationInputs, IntegrationManifest, IntegrationRoot,
     INTEGRATION_MANIFEST_SCHEMA_VERSION, MAX_BOUND_GATE_IDS, MAX_INTEGRATION_CANDIDATES,
     MAX_PROVIDER_VERSION_BYTES, MAX_TARGET_REF_BYTES,
 };

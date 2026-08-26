@@ -2,10 +2,11 @@
 //! proof-carrying CandidateBinding, and candidate-vs-integration root separation.
 
 use bullet_git_types::{
-    combined_proof_root, verify_proof_root, Candidate, CandidateBinding, CandidateManifest,
-    CandidateManifestError, Digest, ExecutionEnvelope, GateId, GitOid, IntegrationId,
-    IntegrationInputs, IntegrationManifest, IntegrationRoot, ProofInputs, ProofRoot, RepoPath,
-    CANDIDATE_MANIFEST_SCHEMA_VERSION, INTEGRATION_MANIFEST_SCHEMA_VERSION, MAX_BOUND_GATE_IDS,
+    combined_proof_root, verify_proof_root, Candidate, CandidateBinding, CandidateBindingCheck,
+    CandidateManifest, CandidateManifestError, Digest, ExecutionEnvelope, GateId, GitOid,
+    IntegrationId, IntegrationInputs, IntegrationManifest, IntegrationRoot, ProofInputs, ProofRoot,
+    RepoPath, CANDIDATE_MANIFEST_SCHEMA_VERSION, INTEGRATION_MANIFEST_SCHEMA_VERSION,
+    MAX_BOUND_GATE_IDS,
 };
 use std::str::FromStr;
 
@@ -216,7 +217,9 @@ fn candidate_binding_golden_is_stable() {
     let back: CandidateBinding =
         serde_json::from_str(&serde_json::to_string(&binding).expect("json")).expect("round trip");
     assert_eq!(back, binding);
-    binding.verify(&candidate, &root).expect("verify");
+    binding
+        .verify(&candidate, &root, &gates(), &envelope())
+        .expect("verify");
 }
 
 #[test]
@@ -344,11 +347,13 @@ fn candidate_binding_refuses_every_hostile_input() {
 #[test]
 fn candidate_binding_verify_on_read_detects_tamper() {
     let (candidate, root, binding) = bound();
+    let expected_gates = gates();
+    let expected_envelope = envelope();
     let mut proof_root = binding.clone();
     proof_root.proof_root = Digest::from_bytes([0; 32]);
     assert_eq!(
         proof_root
-            .verify(&candidate, &root)
+            .verify(&candidate, &root, &expected_gates, &expected_envelope)
             .expect_err("proof root")
             .reason_code(),
         "BINDING_MISMATCH"
@@ -357,7 +362,7 @@ fn candidate_binding_verify_on_read_detects_tamper() {
     content.content_id = repeated_id("cnt", 'f');
     assert_eq!(
         content
-            .verify(&candidate, &root)
+            .verify(&candidate, &root, &expected_gates, &expected_envelope)
             .expect_err("content id")
             .reason_code(),
         "BINDING_MISMATCH"
@@ -366,20 +371,40 @@ fn candidate_binding_verify_on_read_detects_tamper() {
     other_root.root = Digest::from_bytes([1; 32]);
     assert_eq!(
         binding
-            .verify(&candidate, &other_root)
+            .verify(&candidate, &other_root, &expected_gates, &expected_envelope,)
             .expect_err("other root")
             .reason_code(),
         "BINDING_MISMATCH"
     );
     let mut gates_swapped = binding.clone();
     gates_swapped.gate_ids = vec![repeated_id("gat", '9')];
-    gates_swapped
-        .verify(&candidate, &root)
-        .expect("gate set is caller input");
-    assert_ne!(
-        gates_swapped.binding_id().expect("id"),
-        binding.binding_id().expect("id")
-    );
+    let mut runner = binding.clone();
+    runner.envelope.runner_image_digest = Digest::from_bytes([31; 32]);
+    let mut provider = binding.clone();
+    provider.envelope.provider_version = "provider/model@other".into();
+    let mut lock = binding.clone();
+    lock.envelope.lock_digest = Digest::from_bytes([32; 32]);
+    let mut toolchain = binding.clone();
+    toolchain.envelope.toolchain_digest = Digest::from_bytes([33; 32]);
+    let mut environment = binding.clone();
+    environment.envelope.environment_digest = Digest::from_bytes([34; 32]);
+    for (name, changed) in [
+        ("gates", gates_swapped),
+        ("runner", runner),
+        ("provider", provider),
+        ("lock", lock),
+        ("toolchain", toolchain),
+        ("environment", environment),
+    ] {
+        assert_eq!(
+            changed
+                .verify(&candidate, &root, &expected_gates, &expected_envelope)
+                .expect_err(name)
+                .reason_code(),
+            "BINDING_MISMATCH",
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -387,19 +412,40 @@ fn candidate_root_never_validates_as_integration_root() {
     let candidate = candidate();
     let inputs = ProofInputs::empty();
     let proof = ProofRoot::bind(&candidate, &inputs);
+    let expected_gates = gates();
+    let expected_envelope = envelope();
+    let binding = CandidateBinding::bind(
+        &candidate,
+        &proof,
+        expected_gates.clone(),
+        expected_envelope.clone(),
+    )
+    .expect("binding");
+    let check = CandidateBindingCheck {
+        binding: &binding,
+        candidate: &candidate,
+        proof_root: &proof,
+        expected_gate_ids: &expected_gates,
+        expected_envelope: &expected_envelope,
+    };
     let manifest = IntegrationManifest {
         schema_version: INTEGRATION_MANIFEST_SCHEMA_VERSION,
         target_ref: "refs/heads/main".into(),
         target_sha: GitOid::new(format!("sha1:{}", "1".repeat(40))).expect("oid"),
         candidate_ids: vec![candidate.id.clone()],
+        binding_ids: vec![binding.binding_id().expect("binding id")],
         merge_group_sha: None,
         proof_root: combined_proof_root(std::slice::from_ref(&proof)),
         policy_snapshot_id: repeated_id("cnt", '2'),
     };
     let integration_inputs = IntegrationInputs::default();
-    let integration =
-        IntegrationRoot::bind(&manifest, std::slice::from_ref(&proof), &integration_inputs)
-            .expect("root");
+    let integration = IntegrationRoot::bind(
+        &manifest,
+        std::slice::from_ref(&proof),
+        std::slice::from_ref(&check),
+        &integration_inputs,
+    )
+    .expect("root");
     assert_ne!(integration.root, proof.root);
     assert_ne!(integration.root, manifest.proof_root);
     let forged_integration = IntegrationRoot {
@@ -408,7 +454,12 @@ fn candidate_root_never_validates_as_integration_root() {
     };
     assert_eq!(
         forged_integration
-            .verify(&manifest, std::slice::from_ref(&proof), &integration_inputs)
+            .verify(
+                &manifest,
+                std::slice::from_ref(&proof),
+                std::slice::from_ref(&check),
+                &integration_inputs,
+            )
             .expect_err("candidate digest as integration root")
             .reason_code(),
         "INTEGRATION_ROOT_MISMATCH"
