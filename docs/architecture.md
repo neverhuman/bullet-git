@@ -64,13 +64,13 @@ tree.
   roots, local PASETO verification, Kernel's online reservation/final check,
   and signed one-second operation permits. A display name, PID, branch name,
   path, local token, or test checker grants nothing.
-  The audited contract source is hub commit
-  `c07efb10639d500c3e82ccc282265090ff63a4aa`, but no immutable tag points to
-  it and that checkout has no configured publication remote. The schema-2
-  family lock still names alpha.4 hub commit
-  `4d7f21731983e855f07d4a5a8e97fd5d743a3dc7`. BulletGit must not copy the
-  source, invent a tag, or enable a positive checker until an operator
-  publishes the frozen contract and updates the verified lock.
+  No current Hub checkout or commit is an admitted immutable contract subject.
+  The checked `family.lock` is schema 2, names only a historical alpha.4
+  family, and is diagnostic-only: every installer path refuses it by design.
+  BulletGit must not copy the source, treat that historical member OID as
+  authority, invent a tag, or enable a positive checker until an operator
+  publishes the frozen shared contract under signed immutable member tags and
+  a verified schema-3 family lock admits their exact subjects.
 - **Durable replay prerequisite.** The local mutation ledger records the exact
   Mutation/reservation/operation/request digest, authority-envelope digest and
   token nonce, repository, Workspace/generation/nonce, Attempt/fence,
@@ -237,7 +237,7 @@ tree.
 
 Line-delimited JSON: one request object per line on stdin, one response
 object per line on stdout. Input is read through a bounded frame reader;
-frames above 4 MiB fail with `FRAME_TOO_LARGE` and terminate the session,
+frames above 65 MiB fail with `FRAME_TOO_LARGE` and terminate the session,
 invalid UTF-8 fails with `INVALID_UTF8`, and request/parameter objects reject
 unknown fields before dispatch.
 
