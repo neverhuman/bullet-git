@@ -34,7 +34,7 @@ for partition in all fast contract; do
     exit 1
   }
 done
-overlap="$(comm -12 "$partition_tmp/fast" "$partition_tmp/contract")"
+overlap="$(LC_ALL=C comm -12 "$partition_tmp/fast" "$partition_tmp/contract")"
 [[ -z "$overlap" ]] || {
   echo "[ci] OVERLAPPING_TEST_PARTITIONS: fast and contract share cases" >&2
   printf '%s\n' "$overlap" >&2
