@@ -24,6 +24,7 @@ case "$lane" in
     exit 2
     ;;
 esac
+tools+=(find id wc)
 
 missing=0
 for tool in "${tools[@]}"; do

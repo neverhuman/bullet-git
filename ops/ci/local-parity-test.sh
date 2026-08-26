@@ -283,7 +283,7 @@ set -e
   printf '[ci] missing-tool doctor returned %s, expected 1\n' "$missing_status" >&2
   exit 1
 }
-for tool in cargo cargo-nextest jq rustc; do
+for tool in cargo cargo-nextest find id jq rustc wc; do
   [[ "$missing_output" == *"ci-doctor: missing $tool for fast"* ]] || {
     printf '[ci] doctor did not report missing %s\n' "$tool" >&2
     exit 1
