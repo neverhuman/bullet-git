@@ -49,6 +49,15 @@ toml_semantic_line_count() {
   printf '%s\n' "$count"
 }
 
+toml_preamble_is_inert() {
+  local config="$1" line trimmed
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == '[[job]]' ]] && return 0
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$trimmed" || "$trimmed" == \#* ]] || return 1
+  done <<<"$config"
+}
+
 toml_job_count() {
   local config="$1" line count=0
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -112,6 +121,7 @@ validate_jeryu_graph() {
   artifacts[docs]='artifact_paths = [".ci-artifacts/observations/docs.json"]'
   artifacts[required]='artifact_paths = []'
 
+  toml_preamble_is_inert "$config" || return 1
   [[ "$(toml_job_count "$config")" -eq 8 ]] || return 1
   actual_ids="$(toml_job_ids "$config")"
   expected_ids="$(printf '%s\n' "${jobs[@]}")"
@@ -212,6 +222,12 @@ expect_jeryu_graph_rejection direct-required-run "$(replace_line_once "$ci_confi
 expect_jeryu_graph_rejection continue-on-error-unknown-key "$(replace_line_once "$ci_config" \
   'runner_class = "native-rust-clean"' \
   $'runner_class = "native-rust-clean"\ncontinue_on_error = true')"
+expect_jeryu_graph_rejection global-condition-key \
+  $'if = "always"\n'"$ci_config"
+expect_jeryu_graph_rejection global-status-key \
+  $'continue_on_error = true\n'"$ci_config"
+expect_jeryu_graph_rejection global-executor-key \
+  $'runner_class = "hostile"\n'"$ci_config"
 
 expected_activation_refusal='{"schema_version":"bullet.ci-activation-refusal.v1","code":"JERYU_CI_NOT_RATIFIED","status":"BLOCKED","exit_code":78,"release_authority":false}'
 set +e
