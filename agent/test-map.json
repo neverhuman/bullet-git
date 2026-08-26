@@ -93,9 +93,17 @@
       "command": "bash scripts/ci-local.sh required",
       "purpose": "daemon trust-boundary contract checked with the required implementation proof"
     },
+    "mutants.toml": {
+      "command": "bash ops/ci/mutants.sh --baseline",
+      "purpose": "prove the mutation examine list is pinned; this command is not a mutation-score receipt"
+    },
     "ops/": {
       "command": "bash scripts/ci-local.sh required",
       "purpose": "atomic lane implementations, meta-guards, source admission, and sequential local convergence"
+    },
+    "ops/ci/mutants.sh": {
+      "command": "bash ops/ci/mutants.sh --baseline",
+      "purpose": "prove the L-16a baseline helper is executable and structurally closed"
     },
     "rust-toolchain.toml": {
       "command": "bash scripts/ci-local.sh required",
