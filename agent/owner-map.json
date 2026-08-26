@@ -13,6 +13,7 @@
     "Cargo.toml": "workspace",
     "Justfile": "ops",
     "LICENSE": "workspace",
+    "mutants.toml": "ops",
     "README.md": "docs",
     "SPLIT.md": "split",
     "agent/": "agent",
