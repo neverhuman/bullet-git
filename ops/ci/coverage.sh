@@ -8,4 +8,5 @@ rm -f -- .ci-artifacts/reports/coverage.lcov
 log "scheduled workspace coverage diagnostic"
 cargo llvm-cov nextest --locked --workspace --lcov --output-path .ci-artifacts/reports/coverage.lcov
 [[ -s .ci-artifacts/reports/coverage.lcov ]] || { echo "[ci] COVERAGE_REPORT_MISSING" >&2; exit 1; }
+bash ops/ci/assert-coverage.sh
 log "scheduled coverage diagnostic passed"

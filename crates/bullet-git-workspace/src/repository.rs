@@ -461,12 +461,14 @@ impl RealRepository {
         let stage = self.workspace.stage_generation()?;
         let stage_repo = stage.repo_dir();
         let mut stage_journal = DurableJournal::open(stage.journal_dir())?;
-        let mut ignored_undo = Vec::new();
+        let mut unrestored = Vec::new();
         if let Err(error) =
-            crate::apply::apply_all(&stage_repo, patches, normalized, &mut ignored_undo)
+            crate::apply::apply_all(&stage_repo, patches, normalized, &mut unrestored)
         {
-            crate::apply::restore_all(&ignored_undo);
-            return Err(error);
+            return Err(match crate::apply::restore_all(&unrestored) {
+                Some(rollback) => error.with_failed_rollback(&rollback),
+                None => error,
+            });
         }
         stage_journal.record_batch(mutations)?;
         validate_journal_objects(&stage_journal, &self.cas)?;

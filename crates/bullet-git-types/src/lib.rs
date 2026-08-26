@@ -3,6 +3,7 @@
 mod authority;
 mod change;
 mod ids;
+mod integration;
 mod lineage;
 mod proposal;
 pub mod schema_bundle;
@@ -16,6 +17,12 @@ pub use change::{
 pub use ids::{
     AttemptId, CandidateId, ChangeId, CheckpointId, ContentId, GateId, GitOid, GitOidAlgorithm,
     GraphRevisionId, PlanRevisionId, RepositoryId, VariantId, WorkPackageId,
+};
+pub use integration::{
+    combined_proof_root, BindingId, CandidateBinding, ExecutionEnvelope, IntegrationError,
+    IntegrationId, IntegrationInputs, IntegrationManifest, IntegrationRoot,
+    INTEGRATION_MANIFEST_SCHEMA_VERSION, MAX_BOUND_GATE_IDS, MAX_INTEGRATION_CANDIDATES,
+    MAX_PROVIDER_VERSION_BYTES, MAX_TARGET_REF_BYTES,
 };
 pub use lineage::{ChangeEvolution, LineageError, LineageGraph};
 pub use proposal::{

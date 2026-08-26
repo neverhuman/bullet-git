@@ -214,14 +214,14 @@ exact_workflow_file_inventory "${workflow_file_inventory[@]}" || {
 required_definition="$(<"$required")"
 scheduled_definition="$(<"$scheduled")"
 required_job_ids=$'source_scan\nfast\nlint\ncontract\nsecurity\ndocs\nrequired'
-scheduled_job_ids=$'source_scan\nhistory\nlinks\nadvisory\ncoverage\nmacos\nwindows'
+scheduled_job_ids=$'source_scan\nhistory\nlinks\nadvisory\ncoverage\nmacos\nwindows\naudit'
 required_workflow_hash=aab8fea7656420a66897aef2eca86362dc7d04fcc81b12354f222f14f5b3d737
-scheduled_workflow_hash=b2fffb6abf26d375c6eb5b3364508f8b9bf6b2a7d6015234e007bbca9d772e8a
+scheduled_workflow_hash=74d2f0e3a174ca1e90c98083518d1eebc862493d68ebce391b79e44442b2cf5d
 exact_workflow_inventory "$required_definition" "$required_job_ids" 6 1 "$required_workflow_hash" || {
   echo '[ci] REQUIRED_WORKFLOW_INVENTORY_DRIFT' >&2
   exit 1
 }
-exact_workflow_inventory "$scheduled_definition" "$scheduled_job_ids" 7 0 "$scheduled_workflow_hash" || {
+exact_workflow_inventory "$scheduled_definition" "$scheduled_job_ids" 8 0 "$scheduled_workflow_hash" || {
   echo '[ci] SCHEDULED_WORKFLOW_INVENTORY_DRIFT' >&2
   exit 1
 }
@@ -337,6 +337,53 @@ if exact_upload_step "$failed_stage_upload" "${scheduled_upload_steps[coverage]}
   exit 1
 fi
 
+# Hosted audit job: the whole job is exact. Neutral only through the typed 78
+# auditor refusal, an unconditional lane, and an upload only a green lane reaches.
+expected_audit_job() {
+  printf '%s\n' \
+    '  audit:' \
+    '    name: Jankurai audit' \
+    '    needs: source_scan' \
+    '    runs-on: ubuntu-24.04' \
+    '    timeout-minutes: 15' \
+    '    steps:' \
+    '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2' \
+    '        with:' \
+    '          persist-credentials: false' \
+    '      - name: Resolve the pinned auditor or refuse neutral' \
+    '        run: |' \
+    '          command -v jankurai >/dev/null 2>&1 || {' \
+    '            echo "::error::AUDITOR_UNAVAILABLE_HOSTED: jankurai 1.6.11 is a machine-local build with no checksum-pinned hosted artifact; the audit lane did not run"' \
+    '            exit 78' \
+    '          }' \
+    '      - name: Run audit lane' \
+    '        id: lane' \
+    '        run: bash scripts/ci-local.sh audit' \
+    '      - name: Upload audit observation' \
+    "        if: \${{ !cancelled() && steps.lane.outcome == 'success' }}" \
+    '        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2' \
+    '        with:' \
+    '          name: bullet-git-audit' \
+    '          path: .ci-artifacts/observations/audit.json' \
+    '          include-hidden-files: true' \
+    '          if-no-files-found: error' \
+    '          retention-days: 14'
+}
+validate_audit_job() { [[ "$1" == "$(expected_audit_job)" ]]; }
+audit_block="$(job_block "$scheduled" audit)"
+validate_audit_job "$audit_block" || { echo '[ci] SCHEDULED_AUDIT_JOB_CONTRACT_INVALID' >&2; exit 1; }
+expect_audit_rejection() {
+  validate_audit_job "$1" >/dev/null 2>&1 || return 0
+  printf '[ci] %s\n' "$2" >&2
+  exit 1
+}
+expect_audit_rejection "${audit_block/'            exit 78'/'            exit 0'}" GREEN_AUDITOR_NEUTRAL_ACCEPTED
+expect_audit_rejection "${audit_block/'::error::AUDITOR_UNAVAILABLE_HOSTED'/'::warning::AUDITOR_UNAVAILABLE_HOSTED'}" UNTYPED_AUDITOR_NEUTRAL_ACCEPTED
+expect_audit_rejection "${audit_block/'        run: bash scripts/ci-local.sh audit'/'        run: true # run: bash scripts/ci-local.sh audit'}" COMMENTED_NOOP_AUDIT_LANE_ACCEPTED
+expect_audit_rejection "${audit_block/'        run: bash scripts/ci-local.sh audit'/$'        if: ${{ always() }}\n        run: bash scripts/ci-local.sh audit'}" CONDITIONAL_AUDIT_LANE_ACCEPTED
+expect_audit_rejection "${audit_block/"        if: \${{ !cancelled() && steps.lane.outcome == 'success' }}"/"        if: \${{ !cancelled() }}"}" FAILED_AUDIT_LANE_UPLOAD_ACCEPTED
+expect_audit_rejection "${audit_block/'          path: .ci-artifacts/observations/audit.json'/'          path: .ci-artifacts/'}" HOSTILE_AUDIT_UPLOAD_PATH_ACCEPTED
+
 # Mutation proofs: surviving command text in a comment is not execution, and
 # upload paths are an allowlist rather than an expanding broad-root denylist.
 fast_block="$(job_block "$required" fast)"
@@ -388,7 +435,7 @@ if exact_workflow_inventory "${required_definition}${broad_upload_job}" "$requir
   echo '[ci] EXTRA_REQUIRED_BROAD_UPLOAD_JOB_ACCEPTED' >&2
   exit 1
 fi
-if exact_workflow_inventory "${scheduled_definition}${broad_upload_job}" "$scheduled_job_ids" 7 0 "$scheduled_workflow_hash"; then
+if exact_workflow_inventory "${scheduled_definition}${broad_upload_job}" "$scheduled_job_ids" 8 0 "$scheduled_workflow_hash"; then
   echo '[ci] EXTRA_SCHEDULED_BROAD_UPLOAD_JOB_ACCEPTED' >&2
   exit 1
 fi

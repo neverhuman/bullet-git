@@ -1,11 +1,19 @@
 //! Hardened git command builder (spec §20.3 hostile-git controls).
+//!
+//! The executable is never looked up on `PATH`: every [`SafeGit`] carries a
+//! [`PinnedGit`] (absolute path, BLAKE3 digest verified once, wall-clock
+//! deadline, per-stream output caps) and every invocation runs through it.
+
+mod binary;
 
 use crate::{git_config, io_err, CapabilityError};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+use binary::PreparedCommand;
+pub use binary::{GitBounds, PinSource, PinnedGit, SYSTEM_GIT_CANDIDATES};
 
 /// File transport policy for one git invocation.
 ///
@@ -56,6 +64,7 @@ impl GitOutput {
 /// rejected if it contains a command-bearing or truth-redirecting key.
 #[derive(Debug)]
 pub struct SafeGit {
+    binary: PinnedGit,
     home_dir: PathBuf,
     xdg_config_dir: PathBuf,
     xdg_cache_dir: PathBuf,
@@ -64,12 +73,36 @@ pub struct SafeGit {
 }
 
 impl SafeGit {
-    /// Prepare the isolation directories and deny script under `runtime_dir`.
+    /// Prepare the isolation directories under `runtime_dir` using the
+    /// process-wide default binary: the pin installed through
+    /// [`PinnedGit::install_default`], else the first admissible
+    /// [`SYSTEM_GIT_CANDIDATES`] entry self-pinned once (trust on first use,
+    /// reported as [`PinSource::SelfPinned`]). Production callers install an
+    /// operator pin first or use [`SafeGit::with_binary`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `IO_FAILED` when the runtime directories cannot be created and
+    /// `GIT_BINARY_NOT_FOUND` when no default binary is admissible.
+    pub fn new(runtime_dir: &Path) -> Result<Self, CapabilityError> {
+        let binary = PinnedGit::process_default()?.clone();
+        Self::with_binary(runtime_dir, binary)
+    }
+
+    /// The pinned executable every invocation of this instance runs; its
+    /// [`PinnedGit::source`] tells whether an operator vouched for it.
+    #[must_use]
+    pub fn binary(&self) -> &PinnedGit {
+        &self.binary
+    }
+
+    /// Prepare the isolation directories and deny script under `runtime_dir`
+    /// for an explicitly pinned binary.
     ///
     /// # Errors
     ///
     /// Returns `IO_FAILED` when the runtime directories cannot be created.
-    pub fn new(runtime_dir: &Path) -> Result<Self, CapabilityError> {
+    pub fn with_binary(runtime_dir: &Path, binary: PinnedGit) -> Result<Self, CapabilityError> {
         let home_dir = runtime_dir.join("home");
         let xdg_config_dir = runtime_dir.join("xdg-config");
         let xdg_cache_dir = runtime_dir.join("xdg-cache");
@@ -83,6 +116,7 @@ impl SafeGit {
         fs::set_permissions(&askpass, fs::Permissions::from_mode(0o700))
             .map_err(|err| io_err("chmod askpass deny script", &err))?;
         Ok(Self {
+            binary,
             home_dir,
             xdg_config_dir,
             xdg_cache_dir,
@@ -93,23 +127,33 @@ impl SafeGit {
 
     /// Build a hardened git command after validating repository-local config.
     ///
+    /// Crate-private so that no caller can bypass the deadline and output
+    /// bounds applied by [`SafeGit::run`], [`SafeGit::probe`], and
+    /// [`SafeGit::head_state`].
+    ///
     /// # Errors
     ///
     /// Returns `HOSTILE_GIT_CONFIG` when local configuration can execute code,
     /// include another config source, or redirect repository truth.
-    pub fn command(
+    pub(crate) fn command(
         &self,
         repo: Option<&Path>,
         file_protocol: FileProtocol,
-    ) -> Result<Command, CapabilityError> {
+    ) -> Result<PreparedCommand, CapabilityError> {
         if let Some(repo) = repo {
-            git_config::validate(repo, self.base_command(None, FileProtocol::Never))?;
+            let inspect = self.base_command(None, FileProtocol::Never)?;
+            git_config::validate(repo, inspect.command)?;
         }
-        Ok(self.base_command(repo, file_protocol))
+        self.base_command(repo, file_protocol)
     }
 
-    fn base_command(&self, repo: Option<&Path>, file_protocol: FileProtocol) -> Command {
-        let mut cmd = Command::new("git");
+    fn base_command(
+        &self,
+        repo: Option<&Path>,
+        file_protocol: FileProtocol,
+    ) -> Result<PreparedCommand, CapabilityError> {
+        let mut prepared = self.binary.command()?;
+        let cmd = &mut prepared.command;
         cmd.env_clear();
         if let Some(path) = std::env::var_os("PATH") {
             cmd.env("PATH", path);
@@ -149,14 +193,16 @@ impl SafeGit {
         if let Some(repo) = repo {
             cmd.arg("-C").arg(repo);
         }
-        cmd
+        Ok(prepared)
     }
 
     /// Run a git command that must succeed.
     ///
     /// # Errors
     ///
-    /// Returns `GIT_FAILED` on a nonzero exit, `IO_FAILED` when spawning fails.
+    /// Returns `GIT_FAILED` on a nonzero exit, `GIT_DEADLINE_EXCEEDED` or
+    /// `GIT_OUTPUT_BOUND_EXCEEDED` when a bound of the pinned binary trips,
+    /// `IO_FAILED` when spawning fails.
     pub fn run(
         &self,
         repo: Option<&Path>,
@@ -164,14 +210,14 @@ impl SafeGit {
         args: &[&str],
         extra_env: &[(&str, OsString)],
     ) -> Result<GitOutput, CapabilityError> {
-        let mut cmd = self.command(repo, file_protocol)?;
+        let mut prepared = self.command(repo, file_protocol)?;
         for (key, value) in extra_env {
-            cmd.env(key, value);
+            prepared.command.env(key, value);
         }
-        cmd.args(args);
-        let out = cmd.output().map_err(|err| io_err("spawn git", &err))?;
+        prepared.command.args(args);
+        let verb = args.first().copied().unwrap_or("git");
+        let out = self.binary.execute(prepared, verb)?;
         if !out.status.success() {
-            let verb = args.first().copied().unwrap_or("git");
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(CapabilityError::Git(format!(
                 "git {verb} exited {:?}: {}",
@@ -186,13 +232,13 @@ impl SafeGit {
     ///
     /// # Errors
     ///
-    /// Returns `IO_FAILED` only when the process cannot be spawned.
+    /// Returns `IO_FAILED` when the process cannot be spawned and a typed
+    /// `GIT_DEADLINE_EXCEEDED` / `GIT_OUTPUT_BOUND_EXCEEDED` when a bound trips.
     pub fn probe(&self, repo: Option<&Path>, args: &[&str]) -> Result<bool, CapabilityError> {
-        let mut cmd = self.command(repo, FileProtocol::Never)?;
-        cmd.args(args);
-        let out = cmd
-            .output()
-            .map_err(|err| io_err("spawn git probe", &err))?;
+        let mut prepared = self.command(repo, FileProtocol::Never)?;
+        prepared.command.args(args);
+        let verb = args.first().copied().unwrap_or("probe");
+        let out = self.binary.execute(prepared, verb)?;
         Ok(out.status.success())
     }
 
@@ -201,13 +247,11 @@ impl SafeGit {
     /// # Errors
     ///
     /// Returns `GIT_FAILED` when git reports anything other than a branch
-    /// (exit 0) or a detached HEAD (exit 1).
+    /// (exit 0) or a detached HEAD (exit 1), or when a bound trips.
     pub fn head_state(&self, repo: &Path) -> Result<HeadState, CapabilityError> {
-        let mut cmd = self.command(Some(repo), FileProtocol::Never)?;
-        cmd.args(["symbolic-ref", "-q", "HEAD"]);
-        let out = cmd
-            .output()
-            .map_err(|err| io_err("spawn git symbolic-ref", &err))?;
+        let mut prepared = self.command(Some(repo), FileProtocol::Never)?;
+        prepared.command.args(["symbolic-ref", "-q", "HEAD"]);
+        let out = self.binary.execute(prepared, "symbolic-ref")?;
         match out.status.code() {
             Some(0) => {
                 let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -226,14 +270,20 @@ impl SafeGit {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::process::Command;
 
     #[test]
     fn command_environment_is_isolated() {
         let dir = tempfile::tempdir().expect("tempdir");
         let git = SafeGit::new(dir.path()).expect("safe git");
-        let cmd = git
+        let prepared = git
             .command(None, FileProtocol::Never)
             .expect("safe command");
+        let cmd = &prepared.command;
+        // The program is the staged descriptor, never a PATH lookup.
+        let program = cmd.get_program().to_string_lossy().into_owned();
+        assert!(program.starts_with("/proc/self/fd/"), "{program}");
+        assert!(git.binary().path().is_absolute());
         let envs: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
         let get = |key: &str| {
             envs.iter()
@@ -263,10 +313,11 @@ mod tests {
     fn clone_call_scopes_file_protocol_to_user() {
         let dir = tempfile::tempdir().expect("tempdir");
         let git = SafeGit::new(dir.path()).expect("safe git");
-        let cmd = git
+        let prepared = git
             .command(None, FileProtocol::User)
             .expect("safe clone command");
-        let args: Vec<String> = cmd
+        let args: Vec<String> = prepared
+            .command
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();

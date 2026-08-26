@@ -1,8 +1,11 @@
-//! Eight-leaf ProofRoot bind, verify-on-read, and one tamper per input.
+//! Eight-leaf ProofRoot bind, verify-on-read, one tamper per input, the
+//! proof-carrying CandidateBinding, and candidate-vs-integration root separation.
 
 use bullet_git_types::{
-    verify_proof_root, Candidate, CandidateManifest, CandidateManifestError, Digest, GitOid,
-    ProofInputs, ProofRoot, RepoPath, CANDIDATE_MANIFEST_SCHEMA_VERSION,
+    combined_proof_root, verify_proof_root, Candidate, CandidateBinding, CandidateManifest,
+    CandidateManifestError, Digest, ExecutionEnvelope, GateId, GitOid, IntegrationId,
+    IntegrationInputs, IntegrationManifest, IntegrationRoot, ProofInputs, ProofRoot, RepoPath,
+    CANDIDATE_MANIFEST_SCHEMA_VERSION, INTEGRATION_MANIFEST_SCHEMA_VERSION, MAX_BOUND_GATE_IDS,
 };
 use std::str::FromStr;
 
@@ -172,4 +175,258 @@ fn proof_root_candidate_identity_change_fails_verify() {
             .reason_code(),
         "PROOF_ROOT_MISMATCH"
     );
+}
+
+fn envelope() -> ExecutionEnvelope {
+    ExecutionEnvelope {
+        runner_image_digest: Digest::from_bytes([21; 32]),
+        provider_version: "provider/model@harness-2026.08".into(),
+        lock_digest: Digest::from_bytes([22; 32]),
+        toolchain_digest: Digest::from_bytes([15; 32]),
+        environment_digest: Digest::from_bytes([14; 32]),
+    }
+}
+
+fn gates() -> Vec<GateId> {
+    vec![repeated_id("gat", '1'), repeated_id("gat", '2')]
+}
+
+fn bound() -> (Candidate, ProofRoot, CandidateBinding) {
+    let candidate = candidate();
+    let root = ProofRoot::bind(&candidate, &populated_inputs());
+    let binding = CandidateBinding::bind(&candidate, &root, gates(), envelope()).expect("binding");
+    (candidate, root, binding)
+}
+
+#[test]
+fn candidate_binding_golden_is_stable() {
+    let (candidate, root, binding) = bound();
+    assert_eq!(binding.candidate_id, candidate.id);
+    assert_eq!(binding.content_id, candidate.content_id);
+    assert_eq!(binding.proof_root, root.root);
+    let canonical =
+        String::from_utf8(serde_jcs::to_vec(&binding).expect("canonical")).expect("utf8");
+    assert!(canonical.starts_with(r#"{"candidate_id":"can_66da272ac2783b2e"#));
+    assert!(canonical.contains(r#""envelope":{"environment_digest":"0e0e"#));
+    assert!(canonical.contains(r#""gate_ids":["gat_1111"#));
+    assert_eq!(
+        binding.binding_id().expect("id").as_str(),
+        "bnd_e8e4742c127722b59536d789606b0e7e3599d21f13bd64915631a44e7ca8b6b4"
+    );
+    let back: CandidateBinding =
+        serde_json::from_str(&serde_json::to_string(&binding).expect("json")).expect("round trip");
+    assert_eq!(back, binding);
+    binding.verify(&candidate, &root).expect("verify");
+}
+
+#[test]
+fn every_candidate_binding_field_is_identity_sensitive() {
+    let (_, _, original) = bound();
+    let id = original.binding_id().expect("id");
+    let mut candidate_id = original.clone();
+    candidate_id.candidate_id = repeated_id("can", 'f');
+    let mut content_id = original.clone();
+    content_id.content_id = repeated_id("cnt", 'f');
+    let mut gate_set = original.clone();
+    gate_set.gate_ids = vec![repeated_id("gat", '1'), repeated_id("gat", '3')];
+    let mut gate_extra = original.clone();
+    gate_extra.gate_ids.push(repeated_id("gat", '3'));
+    let mut proof_root = original.clone();
+    proof_root.proof_root = Digest::from_bytes([99; 32]);
+    let mut runner = original.clone();
+    runner.envelope.runner_image_digest = Digest::from_bytes([98; 32]);
+    let mut provider = original.clone();
+    provider.envelope.provider_version = "provider/model@harness-2026.09".into();
+    let mut lock = original.clone();
+    lock.envelope.lock_digest = Digest::from_bytes([97; 32]);
+    let mut toolchain = original.clone();
+    toolchain.envelope.toolchain_digest = Digest::from_bytes([96; 32]);
+    let mut environment = original.clone();
+    environment.envelope.environment_digest = Digest::from_bytes([95; 32]);
+    let cases = [
+        ("candidate_id", candidate_id),
+        ("content_id", content_id),
+        ("gate_ids", gate_set),
+        ("gate_ids extra", gate_extra),
+        ("proof_root", proof_root),
+        ("envelope.runner_image_digest", runner),
+        ("envelope.provider_version", provider),
+        ("envelope.lock_digest", lock),
+        ("envelope.toolchain_digest", toolchain),
+        ("envelope.environment_digest", environment),
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for (field, changed) in &cases {
+        let changed_id = changed.binding_id().expect(field);
+        assert_ne!(changed_id, id, "{field}");
+        assert!(seen.insert(changed_id), "{field} collided");
+    }
+    let value = serde_json::to_value(&original).expect("value");
+    let top = value.as_object().expect("object");
+    let envelope_fields = top["envelope"].as_object().expect("envelope").len();
+    let swept_top = cases
+        .iter()
+        .map(|(name, _)| name.split([' ', '.']).next().expect("field"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let swept_envelope = cases
+        .iter()
+        .filter(|(name, _)| name.starts_with("envelope."))
+        .count();
+    assert_eq!(swept_top.len() + 1, top.len(), "unswept binding field");
+    assert_eq!(swept_envelope, envelope_fields, "unswept envelope field");
+    let mut schema = original;
+    schema.schema_version = INTEGRATION_MANIFEST_SCHEMA_VERSION + 1;
+    assert_eq!(
+        schema.binding_id().expect_err("schema").reason_code(),
+        "UNSUPPORTED_SCHEMA"
+    );
+}
+
+#[test]
+fn candidate_binding_refuses_every_hostile_input() {
+    let candidate = candidate();
+    let root = ProofRoot::bind(&candidate, &populated_inputs());
+    let refuse = |root: &ProofRoot, gates: Vec<GateId>, envelope: ExecutionEnvelope| {
+        CandidateBinding::bind(&candidate, root, gates, envelope)
+            .expect_err("refused")
+            .reason_code()
+    };
+    let mut other_subject = root.clone();
+    other_subject.candidate = repeated_id("can", 'f');
+    assert_eq!(
+        refuse(&other_subject, gates(), envelope()),
+        "PROOF_ROOT_SUBJECT_MISMATCH"
+    );
+    let mut toolchain = envelope();
+    toolchain.toolchain_digest = Digest::from_bytes([0; 32]);
+    assert_eq!(refuse(&root, gates(), toolchain), "ENVELOPE_MISMATCH");
+    let mut environment = envelope();
+    environment.environment_digest = Digest::from_bytes([0; 32]);
+    assert_eq!(refuse(&root, gates(), environment), "ENVELOPE_MISMATCH");
+    assert_eq!(refuse(&root, vec![], envelope()), "EMPTY_GATE_SET");
+    let duplicate = vec![repeated_id("gat", '1'), repeated_id("gat", '1')];
+    assert_eq!(
+        refuse(&root, duplicate, envelope()),
+        "GATE_IDS_NOT_ASCENDING"
+    );
+    let unsorted = vec![repeated_id("gat", '2'), repeated_id("gat", '1')];
+    assert_eq!(
+        refuse(&root, unsorted, envelope()),
+        "GATE_IDS_NOT_ASCENDING"
+    );
+    let oversized = (0..=MAX_BOUND_GATE_IDS)
+        .map(|index| GateId::from_seed(&index.to_string()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(oversized.len(), MAX_BOUND_GATE_IDS + 1);
+    assert_eq!(refuse(&root, oversized, envelope()), "GATE_SET_TOO_LARGE");
+    for version in ["", " ", "provider model", "\u{e9}", &"v".repeat(129)] {
+        let mut bad = envelope();
+        bad.provider_version = version.to_string();
+        assert_eq!(
+            refuse(&root, gates(), bad),
+            "INVALID_PROVIDER_VERSION",
+            "{version:?}"
+        );
+    }
+    let mut forged = candidate.clone();
+    forged.id = repeated_id("can", 'e');
+    let forged_root = ProofRoot::bind(&forged, &ProofInputs::empty());
+    assert_eq!(
+        CandidateBinding::bind(&forged, &forged_root, gates(), envelope())
+            .expect_err("forged candidate")
+            .reason_code(),
+        "CANDIDATE_ID_MISMATCH"
+    );
+}
+
+#[test]
+fn candidate_binding_verify_on_read_detects_tamper() {
+    let (candidate, root, binding) = bound();
+    let mut proof_root = binding.clone();
+    proof_root.proof_root = Digest::from_bytes([0; 32]);
+    assert_eq!(
+        proof_root
+            .verify(&candidate, &root)
+            .expect_err("proof root")
+            .reason_code(),
+        "BINDING_MISMATCH"
+    );
+    let mut content = binding.clone();
+    content.content_id = repeated_id("cnt", 'f');
+    assert_eq!(
+        content
+            .verify(&candidate, &root)
+            .expect_err("content id")
+            .reason_code(),
+        "BINDING_MISMATCH"
+    );
+    let mut other_root = root.clone();
+    other_root.root = Digest::from_bytes([1; 32]);
+    assert_eq!(
+        binding
+            .verify(&candidate, &other_root)
+            .expect_err("other root")
+            .reason_code(),
+        "BINDING_MISMATCH"
+    );
+    let mut gates_swapped = binding.clone();
+    gates_swapped.gate_ids = vec![repeated_id("gat", '9')];
+    gates_swapped
+        .verify(&candidate, &root)
+        .expect("gate set is caller input");
+    assert_ne!(
+        gates_swapped.binding_id().expect("id"),
+        binding.binding_id().expect("id")
+    );
+}
+
+#[test]
+fn candidate_root_never_validates_as_integration_root() {
+    let candidate = candidate();
+    let inputs = ProofInputs::empty();
+    let proof = ProofRoot::bind(&candidate, &inputs);
+    let manifest = IntegrationManifest {
+        schema_version: INTEGRATION_MANIFEST_SCHEMA_VERSION,
+        target_ref: "refs/heads/main".into(),
+        target_sha: GitOid::new(format!("sha1:{}", "1".repeat(40))).expect("oid"),
+        candidate_ids: vec![candidate.id.clone()],
+        merge_group_sha: None,
+        proof_root: combined_proof_root(std::slice::from_ref(&proof)),
+        policy_snapshot_id: repeated_id("cnt", '2'),
+    };
+    let integration_inputs = IntegrationInputs::default();
+    let integration =
+        IntegrationRoot::bind(&manifest, std::slice::from_ref(&proof), &integration_inputs)
+            .expect("root");
+    assert_ne!(integration.root, proof.root);
+    assert_ne!(integration.root, manifest.proof_root);
+    let forged_integration = IntegrationRoot {
+        subject: integration.subject.clone(),
+        root: proof.root,
+    };
+    assert_eq!(
+        forged_integration
+            .verify(&manifest, std::slice::from_ref(&proof), &integration_inputs)
+            .expect_err("candidate digest as integration root")
+            .reason_code(),
+        "INTEGRATION_ROOT_MISMATCH"
+    );
+    let forged_proof = ProofRoot {
+        candidate: candidate.id.clone(),
+        root: integration.root,
+    };
+    assert_eq!(
+        verify_proof_root(&forged_proof, &candidate, &inputs)
+            .expect_err("integration digest as candidate root")
+            .reason_code(),
+        "PROOF_ROOT_MISMATCH"
+    );
+    let proof_json = serde_json::to_string(&proof).expect("json");
+    assert!(serde_json::from_str::<IntegrationRoot>(&proof_json).is_err());
+    let integration_json = serde_json::to_string(&integration).expect("json");
+    assert!(serde_json::from_str::<ProofRoot>(&integration_json).is_err());
+    assert!(IntegrationId::parse(candidate.id.as_str()).is_err());
+    assert_ne!(integration.subject.as_str(), candidate.id.as_str());
 }

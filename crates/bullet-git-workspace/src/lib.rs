@@ -42,7 +42,10 @@ pub use patch::{
 pub use preservation::{PreservationAuthority, PreservationError, PreservationReceipt};
 pub use reflink::{copy_tree_byte_identical, copy_tree_prefers_reflink, CopyMode};
 pub use repository::{AgentRepository, CommitIdentity, ExpectedAuthority, RealRepository};
-pub use safe_git::{FileProtocol, GitOutput, HeadState, SafeGit};
+pub use safe_git::{
+    FileProtocol, GitBounds, GitOutput, HeadState, PinSource, PinnedGit, SafeGit,
+    SYSTEM_GIT_CANDIDATES,
+};
 pub use scope::{normalize_rel_path, ScopeGrant};
 
 use bullet_git_types::{
@@ -173,6 +176,9 @@ pub enum CapabilityError {
     /// Repository-local Git configuration could execute code or redirect truth.
     #[error("hostile repository-local git config: {0}")]
     HostileGitConfig(String),
+    /// Pinned Git binary verification, staging, or bounded execution failed.
+    #[error(transparent)]
+    GitBinary(#[from] GitBinaryError),
     /// Filesystem or process failure.
     #[error("workspace io failure: {0}")]
     Io(String),
@@ -222,6 +228,7 @@ impl CapabilityError {
             Self::Generation(error) => error.reason_code(),
             Self::Preservation(error) => error.reason_code(),
             Self::HostileGitConfig(_) => "HOSTILE_GIT_CONFIG",
+            Self::GitBinary(error) => error.reason_code(),
             Self::Io(_) => "IO_FAILED",
             Self::Types(_) => "INVALID_TYPES",
             Self::Proposal(error) => error.reason_code(),
@@ -254,4 +261,92 @@ impl From<TypesError> for CapabilityError {
 
 pub(crate) fn io_err(context: &str, err: &std::io::Error) -> CapabilityError {
     CapabilityError::Io(format!("{context}: {err}"))
+}
+
+/// Typed refusal from Git binary pinning, staging, or bounded execution.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum GitBinaryError {
+    /// The pin path is not absolute.
+    #[error("git binary path must be absolute: {0}")]
+    PathNotAbsolute(String),
+    /// The pin path is missing or its metadata/bytes cannot be read.
+    #[error("git binary unreadable at {path}: {reason}")]
+    Unreadable {
+        /// Refused path.
+        path: String,
+        /// Operating-system reason.
+        reason: String,
+    },
+    /// The pin path is a symbolic link.
+    #[error("git binary is a symlink: {0}")]
+    Symlink(String),
+    /// The pin path is not a regular file.
+    #[error("git binary is not a regular file: {0}")]
+    NotRegular(String),
+    /// The pin path has no execute bit.
+    #[error("git binary is not executable: {0}")]
+    NotExecutable(String),
+    /// The file bytes hash to a different digest than expected.
+    #[error("git binary digest mismatch at {path}: expected {expected}, found {actual}")]
+    DigestMismatch {
+        /// Refused path.
+        path: String,
+        /// Caller-expected digest hex.
+        expected: String,
+        /// Digest hex actually observed.
+        actual: String,
+    },
+    /// The verified bytes could not be staged into a sealed memfd or the
+    /// staged descriptor could not be prepared for execution.
+    #[error("git binary staging failed for {path}: {reason}")]
+    Staging {
+        /// Pinned path.
+        path: String,
+        /// Operating-system reason.
+        reason: String,
+    },
+    /// A different default binary is already installed for this process.
+    #[error("a different git binary is already pinned for this process: {0}")]
+    AlreadyPinned(String),
+    /// No fixed candidate location holds an admissible binary.
+    #[error("no admissible system git at any of {SYSTEM_GIT_CANDIDATES:?}: {0}")]
+    NotFound(String),
+    /// The child ran past its wall-clock deadline and was killed.
+    #[error("git {verb} exceeded the {limit_ms} ms deadline")]
+    DeadlineExceeded {
+        /// Git subcommand.
+        verb: String,
+        /// Configured deadline in milliseconds.
+        limit_ms: u128,
+    },
+    /// The child produced more bytes on one stream than admitted.
+    #[error("git {verb} exceeded the {limit} byte {stream} bound")]
+    OutputBoundExceeded {
+        /// Git subcommand.
+        verb: String,
+        /// `stdout` or `stderr`.
+        stream: &'static str,
+        /// Configured bound in bytes.
+        limit: usize,
+    },
+}
+
+impl GitBinaryError {
+    /// Stable machine-readable reason code.
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::PathNotAbsolute(_) => "GIT_BINARY_PATH_NOT_ABSOLUTE",
+            Self::Unreadable { .. } => "GIT_BINARY_UNREADABLE",
+            Self::Symlink(_) => "GIT_BINARY_SYMLINK",
+            Self::NotRegular(_) => "GIT_BINARY_NOT_REGULAR",
+            Self::NotExecutable(_) => "GIT_BINARY_NOT_EXECUTABLE",
+            Self::DigestMismatch { .. } => "GIT_BINARY_DIGEST_MISMATCH",
+            Self::Staging { .. } => "GIT_BINARY_STAGING_FAILED",
+            Self::AlreadyPinned(_) => "GIT_BINARY_ALREADY_PINNED",
+            Self::NotFound(_) => "GIT_BINARY_NOT_FOUND",
+            Self::DeadlineExceeded { .. } => "GIT_DEADLINE_EXCEEDED",
+            Self::OutputBoundExceeded { .. } => "GIT_OUTPUT_BOUND_EXCEEDED",
+        }
+    }
 }

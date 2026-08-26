@@ -274,3 +274,31 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
+
+  audit:
+    name: Jankurai audit
+    needs: source_scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Resolve the pinned auditor or refuse neutral
+        run: |
+          command -v jankurai >/dev/null 2>&1 || {
+            echo "::error::AUDITOR_UNAVAILABLE_HOSTED: jankurai 1.6.11 is a machine-local build with no checksum-pinned hosted artifact; the audit lane did not run"
+            exit 78
+          }
+      - name: Run audit lane
+        id: lane
+        run: bash scripts/ci-local.sh audit
+      - name: Upload audit observation
+        if: ${{ !cancelled() && steps.lane.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bullet-git-audit
+          path: .ci-artifacts/observations/audit.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14

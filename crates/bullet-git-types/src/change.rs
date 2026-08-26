@@ -551,7 +551,10 @@ fn path_is_within(grant: &str, path: &str) -> bool {
             .is_some_and(|remainder| remainder.starts_with('/'))
 }
 
-fn hash_canonical<T: Serialize>(domain: &str, value: &T) -> Result<Digest, CandidateManifestError> {
+pub(crate) fn hash_canonical<T: Serialize>(
+    domain: &str,
+    value: &T,
+) -> Result<Digest, CandidateManifestError> {
     let canonical = serde_jcs::to_vec(value)
         .map_err(|error| CandidateManifestError::CanonicalJson(error.to_string()))?;
     let mut hasher = blake3::Hasher::new();
