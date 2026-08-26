@@ -12,6 +12,14 @@ impl Clock for FixedClock {
     }
 }
 
+struct UnexpectedClock;
+
+impl Clock for UnexpectedClock {
+    fn now_unix_ms(&self) -> Result<u64, GatewayError> {
+        panic!("request-subject mismatch must refuse before reading trusted time")
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SettlementBehavior {
     Exact,
@@ -106,13 +114,20 @@ impl FinalAuthorityCheck for FixedCheck {
 }
 
 fn subject() -> MutationSubject {
+    let request_digest = transport_fingerprint(
+        MutationOperation::ApplyPatch,
+        &serde_json::json!({"paseto": "fixture"}),
+        &serde_json::json!({"path": "src/lib.rs"}),
+    )
+    .expect("fixture fingerprint")
+    .to_hex();
     MutationSubject {
         authority_envelope_digest: "a".repeat(64),
         authority_token_nonce: "b".repeat(64),
         mutation_id: format!("mut_{}", "1".repeat(64)),
         reservation_id: format!("rsv_{}", "2".repeat(64)),
         operation: MutationOperation::ApplyPatch,
-        request_digest: "3".repeat(64),
+        request_digest,
         repository_id: format!("rep_{}", "4".repeat(64)),
         workspace_id: format!("wsp_{}", "5".repeat(64)),
         workspace_generation: 6,
@@ -268,6 +283,37 @@ fn changed_fields_and_expiry_never_produce_a_consumable_permit() {
         };
         assert_eq!(error.reason_code(), "AUTHORITY_SUBJECT_MISMATCH");
     }
+
+    let digest_temp = tempfile::tempdir().expect("tempdir");
+    let changed_subject = MutationSubject {
+        request_digest: "0".repeat(64),
+        ..subject()
+    };
+    let mut digest_gateway = AuthorityGateway {
+        checker: Box::new(FixedCheck {
+            subject: changed_subject,
+            expires_at_unix_ms: 200,
+            mutate_fingerprint: false,
+            settlement: SettlementBehavior::Exact,
+        }),
+        clock: Box::new(UnexpectedClock),
+        ledger: Some(MutationLedger::open(digest_temp.path()).expect("ledger")),
+    };
+
+    let error = refused(digest_gateway.authorize(
+        MutationOperation::ApplyPatch,
+        &serde_json::json!({"paseto": "fixture"}),
+        &serde_json::json!({"path": "src/lib.rs"}),
+        &subject().attempt_id,
+        subject().attempt_fence,
+        &WRITER_NONCE,
+    ));
+
+    assert_eq!(error.reason_code(), "AUTHORITY_SUBJECT_MISMATCH");
+    assert_eq!(
+        digest_temp.path().read_dir().expect("ledger dir").count(),
+        0
+    );
 }
 
 #[test]

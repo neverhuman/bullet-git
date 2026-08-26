@@ -268,6 +268,7 @@ impl AuthorityGateway {
         if decision.operation != operation
             || decision.subject.operation != operation
             || decision.transport_fingerprint != fingerprint
+            || decision.subject.request_digest != fingerprint.to_hex()
         {
             return Err(GatewayError::SubjectMismatch(
                 "final-check response does not bind the exact operation and request".into(),

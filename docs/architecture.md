@@ -79,8 +79,9 @@ tree.
   subject plus the workspace nonce from its verified authority envelope; a
   future positive adapter must match both signed objects before constructing
   the private daemon decision. The gateway also compares that decision's
-  Attempt, fence, and workspace nonce with the already-parsed writer target
-  before writing a reservation. The legacy request does not expose typed
+  request digest with the exact operation/authority/parameters fingerprint,
+  and its Attempt, fence, and workspace nonce with the already-parsed writer
+  target before reading trusted time or writing a reservation. The legacy request does not expose typed
   repository/Workspace IDs or generation, so there is intentionally no
   positive production path until the frozen typed request replaces it. Every
   field is replay-sensitive and malformed IDs, digests, or generations are
