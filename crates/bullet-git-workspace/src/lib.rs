@@ -30,7 +30,7 @@ pub use advisers::{forecast_conflicts, intent_aware_revert, patch_algebra_disjoi
 pub use cas::{cas_digest, CasError, CasPut, ImmutableCas, PutDisposition, MAX_CAS_OBJECT_BYTES};
 pub use clone::{CloneRequest, PrivateClone, WorkspaceManifest};
 pub use gc::{pin_retained_object, retention_ref_exists, RetentionClass, RetentionPin};
-pub use generation::GenerationError;
+pub use generation::{ActiveGenerationBinding, GenerationError, GenerationParentBinding};
 #[cfg(feature = "fuzzing")]
 pub use git_config::validate_repo_config;
 pub use lineage::WorkspaceLineage;

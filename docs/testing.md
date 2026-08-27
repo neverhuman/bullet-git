@@ -119,7 +119,8 @@ external-link checks use outbound network and fail red when truth is unavailable
   `GIT_TERMINAL_PROMPT=0` and `SafeGit` forces `protocol.file.allow=never`
   (`user` only for the single mirror-to-clone call), an empty `core.hooksPath`,
   an empty `credential.helper`, and a denying `GIT_ASKPASS`.
-- Kill switch: the authority gateway has no positive checker, so a fresh daemon
-  refuses `clone` with `AUTHORITY_CONTRACT_UNAVAILABLE`, and an in-flight
-  reservation that survives a restart freezes further mutation as
-  `MUTATION_OUTCOME_UNKNOWN` instead of being re-authorized.
+- Kill switch: absent or invalid Kernel transport, permit, check, or settlement
+  authority makes a fresh daemon refuse `clone`; an unconfigured daemon reports
+  `AUTHORITY_CONTRACT_UNAVAILABLE`. An in-flight reservation that survives a
+  restart freezes further mutation as `MUTATION_OUTCOME_UNKNOWN` instead of
+  being re-authorized.

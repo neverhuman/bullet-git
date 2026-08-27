@@ -2,8 +2,8 @@
 //! object per line. Documented in `docs/architecture.md`.
 
 use bullet_git_types::{
-    AuthorityEnvelope, Candidate, CandidateProvenance, Change, PatchProposal, ProofRoot,
-    MAX_AGGREGATE_CONTENT_BYTES,
+    schema_bundle::SignedCandidatePreparationGrantV1, AuthorityEnvelope, Candidate,
+    CandidateProvenance, Change, PatchProposal, ProofRoot, MAX_AGGREGATE_CONTENT_BYTES,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
@@ -189,6 +189,9 @@ pub struct ApplyProposalParams {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareParams {
+    /// Kernel-issued carrier. BulletGit admits only its closed generated shape;
+    /// the raw params remain unchanged for Kernel final authentication.
+    pub candidate_preparation_grant: SignedCandidatePreparationGrantV1,
     /// Exact logical Change. Narrative fields are commit inputs, never direct
     /// Candidate provenance fields.
     pub change: Change,

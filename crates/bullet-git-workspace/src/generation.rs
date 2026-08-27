@@ -1,5 +1,8 @@
 //! Immutable workspace generations with one durable active-pointer switch.
 
+mod binding;
+pub use binding::{ActiveGenerationBinding, GenerationParentBinding};
+
 use crate::tree_copy::{
     allocate_pointer_stage, allocate_staging, copy_tree, create_directory,
     inspect_generation_entries, next_generation, read_json, replace_pointer,

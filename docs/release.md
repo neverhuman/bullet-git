@@ -28,7 +28,7 @@ checker. Today every gate is BLOCKED, and the honest status of each is:
 
 | Release gate | Required evidence | Status |
 | --- | --- | --- |
-| Frozen authority contract | operator-published frozen contract and verified lock; the authority gateway has no positive checker, so a fresh daemon refuses `clone` with `AUTHORITY_CONTRACT_UNAVAILABLE` | BLOCKED: no operator contract exists |
+| Frozen authority contract | operator-published frozen contract and verified lock; the component Kernel checker exists, but an unconfigured daemon refuses `clone` with `AUTHORITY_CONTRACT_UNAVAILABLE` and no signed immutable release subject or live authority receipt exists | BLOCKED: no operator contract exists |
 | Component proof | `bash scripts/ci-local.sh required` plus the contract lane green on the release commit | available locally, not release evidence on its own |
 | Conformance score | `bash ops/ci/audit.sh` at or above the `AUDIT_FLOOR` ratchet | local gate only; the pinned auditor is a machine-local build and is not registered in hosted CI |
 | Secret and dependency scan | `bash scripts/ci-local.sh security` (`gitleaks detect`, `cargo deny check bans`) | runs; no release artifact is produced |
@@ -36,7 +36,7 @@ checker. Today every gate is BLOCKED, and the honest status of each is:
 | Backup and restore | the CAS plus the append-only journal are the durable record; a restore drill against a real repository | BLOCKED: no drill has been run |
 | Rollback | immutable workspace generations with one durable active-pointer switch, sealed preservation receipts, receipt-gated cleanup, and receipt-bound tombstones (`crates/bullet-git-workspace/src/{generation,cas,preservation}.rs`) | implemented in code, unproven as a release procedure |
 | Monitoring | typed reason codes and the fsynced JSONL mutation ledger (`crates/bullet-gitd/src/mutation_ledger.rs`); an in-flight reservation that survives restart is `MUTATION_OUTCOME_UNKNOWN` and freezes further mutation | no telemetry pipeline, dashboard, or alert exists |
-| Abuse and rate limits | bounded stdio frames refused before JSON parsing, scope enforcement, and no network surface at all | no forge-facing surface exists to rate limit yet |
+| Abuse and rate limits | bounded stdio frames refused before JSON parsing, scope enforcement, and no forge-facing or public network surface; the only current transport is the peer-authenticated local Kernel UDS | no forge-facing surface exists to rate limit yet |
 | Live oracle | a versioned `jeryu-gitd` from a separately reviewed immutable Jeryu tag | BLOCKED: `ops/ci/nightly.sh` exits 78 (unregistered) and never green |
 
 ## Rules

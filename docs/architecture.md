@@ -48,42 +48,45 @@ tree.
 
 ## Trust model
 
-- **Authority is fail-closed.** The committed hub authority contract is not
-  yet published through an immutable permitted dependency, and Kernel has no
-  production permit endpoint. The public daemon constructor therefore
-  installs only an unavailable final checker. In a fresh daemon, `clone`
-  reaches that checker and returns `AUTHORITY_CONTRACT_UNAVAILABLE` before
-  repository, journal, or preservation I/O. Because no production `clone` can
-  establish a session, `apply_change`, `checkpoint`, `prepare_candidate`, and
-  `cleanup` instead fail their earlier local prerequisite with `NOT_CLONED`;
-  they do not reach authority reservation or repository I/O. Keeping that
-  ordering prevents a future positive checker from reserving a permit for an
-  impossible local session. The legacy unsigned JSON token parser remains only
-  as an earlier rejection layer; it grants no mutation. Production enablement
-  still requires the pinned `bullet-wire` source, protected runtime trust
-  roots, local PASETO verification, Kernel's online reservation/final check,
-  and signed one-second operation permits. A display name, PID, branch name,
-  path, local token, or test checker grants nothing.
+- **Authority is fail-closed.** `Daemon::new()` installs the production
+  `KernelPermitCheck`. On Linux, mutation requires an explicit absolute Kernel
+  UDS, admitted server UID and socket GID, exact socket and peer revalidation,
+  a Kernel-issued one-use permit, and the matching bounded online check and
+  settlement. Missing or malformed transport configuration, non-Linux builds,
+  unsigned or legacy input, denial, drift, timeout, and ambiguous replies all
+  refuse; an unconfigured fresh daemon returns
+  `AUTHORITY_CONTRACT_UNAVAILABLE` before repository, journal, or preservation
+  I/O. Without a successful `clone`, `apply_change`, `checkpoint`,
+  `prepare_candidate`, and `cleanup` fail their earlier local prerequisite with
+  `NOT_CLONED`; they do not reserve authority for an impossible local session.
+  A display name, PID, branch name, path, local token, or test checker grants
+  nothing. This component path is not release or live authority: production
+  admission still requires the pinned `bullet-wire` source, protected runtime
+  trust roots, signed immutable family subjects, distinct workload custody,
+  and exact live receipts.
   No current Hub checkout or commit is an admitted immutable contract subject.
   The checked `family.lock` is schema 2, names only a historical alpha.4
   family, and is diagnostic-only: every installer path refuses it by design.
   BulletGit must not copy the source, treat that historical member OID as
-  authority, invent a tag, or enable a positive checker until an operator
-  publishes the frozen shared contract under signed immutable member tags and
-  a verified schema-3 family lock admits their exact subjects.
+  authority, invent a tag, or configure or credit the installed component
+  checker as admitted live/release authority until an operator publishes the
+  frozen shared contract under signed immutable member tags and a verified
+  schema-3 family lock admits their exact subjects.
 - **Durable replay prerequisite.** The local mutation ledger records the exact
   Mutation/reservation/operation/request digest, authority-envelope digest and
   token nonce, repository, Workspace/generation/nonce, Attempt/fence,
   authority epoch, freeze generation, permit nonce, and permit digest in an
   append-only, fsynced JSONL file. These fields mirror the frozen permit
-  subject plus the workspace nonce from its verified authority envelope; a
-  future positive adapter must match both signed objects before constructing
-  the private daemon decision. The gateway also compares that decision's
+  subject plus the workspace nonce from its verified authority envelope. The
+  production component checker matches those subjects and the exact request
+  fingerprint before constructing the private daemon decision. The gateway also compares that decision's
   request digest with the exact operation/authority/parameters fingerprint,
   and its Attempt, fence, and workspace nonce with the already-parsed writer
-  target before reading trusted time or writing a reservation. The legacy request does not expose typed
-  repository/Workspace IDs or generation, so there is intentionally no
-  positive production path until the frozen typed request replaces it. Every
+  target before reading trusted time or writing a reservation. The legacy token
+  does not expose typed repository/Workspace IDs or generation and cannot by
+  itself grant authority. The component path instead requires the Kernel-issued
+  permit and exact online decision to bind the full mutation request; those
+  bytes are not admitted live/release subjects. Every
   field is replay-sensitive and malformed IDs, digests, or generations are
   refused before reservation. A consumed permit becomes a non-cloneable
   pending mutation. Every daemon mutation reports success only after its exact
@@ -109,11 +112,11 @@ tree.
   reservation; changed subjects conflict. A restart with only an in-flight
   reservation, a partial write, or corrupt state is
   `MUTATION_OUTCOME_UNKNOWN`, never permission to retry. This ledger records
-  evidence only and cannot mint authority or clear a freeze. The settlement
-  and recovery interfaces are transport-neutral foundations, not an online
-  client: immutable wire consumption, permit verification, Kernel settlement,
-  authenticated replay reconciliation, and cross-process exact-replay
-  adoption remain absent. The public daemon still has no positive adapter.
+  evidence only and cannot mint authority or clear a freeze. The production
+  `KernelPermitCheck` is the bounded online client for final check and
+  settlement. Authenticated cross-process exact-replay adoption, signed
+  immutable family admission, protected live workload custody, and live/release
+  receipts remain absent.
 - **No remote, no credential.** `git remote remove origin` runs immediately
   after clone; `credential.helper=` is forced empty, `GIT_ASKPASS` points at
   a deny script, `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND=false`. A
@@ -247,13 +250,14 @@ response: {"id": <same>, "ok": <result>}
           {"id": <same>, "err": {"code": <REASON_CODE>, "message": <text>}}
 ```
 
-The legacy `token` field accepts the old Kernel JSON shape as an opaque input
-to the unavailable gateway. Its local Attempt/fence/nonce comparison is not a
-signature or final authority check and can never make a mutation succeed.
-Empty or malformed values can fail earlier as `UNAUTHORIZED`.
+The legacy `token` field accepts the old Kernel JSON shape as opaque input to
+the gateway. Its local Attempt/fence/nonce comparison is not a signature or
+final authority check and cannot make a mutation succeed. Only a top-level
+Kernel permit that passes the online checker can contribute authority. Empty
+or malformed values can fail earlier as `UNAUTHORIZED`.
 
 `clone` remains the first possible workspace call, but the production daemon
-cannot create that session until the immutable authority consumer lands.
+cannot create that session until admitted online Kernel authority is supplied.
 
 | Method | Params | Result |
 |---|---|---|
@@ -262,11 +266,11 @@ cannot create that session until the immutable authority consumer lands.
 | `apply_change` | `patches`: `[{path, op?, contents_hex?}]` — `op` is `write` (default; full-file `contents_hex` required, hex) or `delete` (must omit `contents_hex`) | `applied`: count |
 | `apply_proposal` | `proposal`: strict schema-1 `PatchProposal` (shared maximum 128 paths, 1 MiB/body, 32 MiB aggregate) | `applied`: count; oversized proposals refuse before mutation |
 | `checkpoint` | — | Checkpoint JSON incl. `git_tree` |
-| `prepare_candidate` | strict `change` plus complete `provenance` (`environment_digest`, `toolchain_digest`, ordered `parent_candidate_ids`, and every other field are mandatory) | provenance-bound Candidate JSON with exact tagged Git OIDs and patch digest |
+| `prepare_candidate` | strict `change`, complete `provenance` (`environment_digest`, `toolchain_digest`, ordered `parent_candidate_ids`, and every other field are mandatory), plus the generated non-optional `candidate_preparation_grant`; BulletGit only decodes its closed shape and presents the raw params unchanged to Kernel final check | provenance-bound Candidate JSON with exact tagged Git OIDs and patch digest |
 | `preserve` | `destination` (new absolute canonical external directory) | opaque `preservation_receipt`, receipt/artifact digests, canonical destination |
 | `cleanup` | `preservation_receipt`, `deleted_at` | `tombstone`, receipt digest, `verified` |
 
-Current production conversation:
+Current unconfigured production conversation:
 
 ```text
 → {"id":1,"method":"clone","token":{...},"params":{"source_repo":"/mirrors/repo.git","base_sha":"sha1:d6d3b35c8e418f44db2264c04548dafd009a934a","root":"/farm","created_at":"2026-08-24T00:00:00Z","allowed_prefixes":["src"],"commit_date":"2026-08-24T00:00:00+00:00"}}

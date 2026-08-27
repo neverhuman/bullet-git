@@ -1,105 +1,26 @@
 //! Request dispatch. The daemon holds the expected attempt/fence/nonce from
 //! the initial `clone` token and verifies every subsequent call against them.
 
-use crate::authority_gateway::{AuthorityGateway, GatewayError, MutationPermit, PendingMutation};
+mod codec;
+
+use crate::authority_gateway::{AuthorityGateway, MutationPermit, PendingMutation};
 use crate::mutation_ledger::{MutationOperation, MutationOutcome};
 use crate::protocol::{
     self, ApplyParams, ApplyProposalParams, BindProofParams, CleanupParams, CloneParams,
-    PatchParam, PrepareParams, PreserveParams, ProofInputParams, Request, VerifyProofParams,
+    PrepareParams, PreserveParams, Request, VerifyProofParams,
 };
-use bullet_git_types::{
-    framed_digest, verify_proof_root, AuthorityError, CandidateManifestError, Digest, ProofInputs,
-    ProofRoot, WireAuthorityToken,
-};
+use bullet_git_types::{framed_digest, verify_proof_root, Digest, ProofRoot, WireAuthorityToken};
 use bullet_git_workspace::{
-    AgentRepository, CapabilityError, CloneRequest, CommitIdentity, ExpectedAuthority, PatchHunk,
-    PreservationAuthority, PrivateClone, RealRepository, ScopeGrant, MAX_CONTENT_BYTES,
+    AgentRepository, CloneRequest, CommitIdentity, ExpectedAuthority, PreservationAuthority,
+    PrivateClone, RealRepository, ScopeGrant,
 };
-use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::path::Path;
 
-type MethodError = (String, String);
-type MethodResult = Result<Value, MethodError>;
-
-fn cap(err: &CapabilityError) -> MethodError {
-    (err.reason_code().to_string(), err.to_string())
-}
-
-fn auth(err: &AuthorityError) -> MethodError {
-    (err.reason_code().to_string(), err.to_string())
-}
-
-fn candidate_manifest(err: &CandidateManifestError) -> MethodError {
-    (err.reason_code().to_string(), err.to_string())
-}
-
-fn gateway(err: &GatewayError) -> MethodError {
-    (err.reason_code().to_string(), err.to_string())
-}
-
-fn not_cloned() -> MethodError {
-    ("NOT_CLONED".into(), "clone must be the first call".into())
-}
-
-fn parse_params<T: DeserializeOwned>(params: &Value) -> Result<T, MethodError> {
-    serde_json::from_value(params.clone())
-        .map_err(|err| ("BAD_REQUEST".into(), format!("invalid params: {err}")))
-}
-
-fn proof_inputs(params: &ProofInputParams) -> ProofInputs<'_> {
-    ProofInputs {
-        scope_and_write_set: params.scope_and_write_set.as_bytes(),
-        runner_and_sandbox: params.runner_and_sandbox.as_bytes(),
-        toolchain_and_deps: params.toolchain_and_deps.as_bytes(),
-        evidence: params.evidence.as_bytes(),
-        verifier_evidence: params.verifier_evidence.as_bytes(),
-        reviews: params.reviews.as_bytes(),
-        policy: params.policy.as_bytes(),
-        approvals_and_effect_receipts: params.approvals_and_effect_receipts.as_bytes(),
-    }
-}
-
-fn to_value<T: serde::Serialize>(value: &T) -> MethodResult {
-    serde_json::to_value(value).map_err(|err| ("ENCODING".into(), format!("encode result: {err}")))
-}
-
-/// Decode one wire patch entry into a typed hunk.
-///
-/// `op` absent or `write` keeps the v1 shape and requires `contents_hex`;
-/// `delete` forbids it. Anything else is `BAD_REQUEST`.
-fn decode_patch(patch: PatchParam) -> Result<PatchHunk, MethodError> {
-    let bad = |message: String| ("BAD_REQUEST".to_string(), message);
-    match patch.op.as_deref() {
-        None | Some("write") => {
-            let Some(hex_text) = patch.contents_hex else {
-                return Err(bad(format!(
-                    "contents_hex required for write op: {}",
-                    patch.path
-                )));
-            };
-            if hex_text.len() > MAX_CONTENT_BYTES.saturating_mul(2) {
-                return Err((
-                    "CONTENT_TOO_LARGE".into(),
-                    format!("{} exceeds {MAX_CONTENT_BYTES} decoded bytes", patch.path),
-                ));
-            }
-            let contents = hex::decode(&hex_text)
-                .map_err(|err| bad(format!("contents_hex for {}: {err}", patch.path)))?;
-            Ok(PatchHunk::write(patch.path, contents))
-        }
-        Some("delete") => {
-            if patch.contents_hex.is_some() {
-                return Err(bad(format!(
-                    "delete op must not carry contents_hex: {}",
-                    patch.path
-                )));
-            }
-            Ok(PatchHunk::delete(patch.path))
-        }
-        Some(other) => Err(bad(format!("unknown patch op {other:?}: {}", patch.path))),
-    }
-}
+use codec::{
+    auth, candidate_manifest, cap, decode_patch, gateway, not_cloned, parse_params, proof_inputs,
+    to_value, MethodError, MethodResult,
+};
 
 struct Session {
     repo: RealRepository,
@@ -130,16 +51,16 @@ impl Default for Daemon {
 }
 
 impl Daemon {
-    /// A daemon with no session and no positive production authority path.
+    /// A daemon with no session and a fail-closed production Kernel checker.
     ///
-    /// Until the frozen `bullet-wire` crate is available from an immutable
-    /// permitted source and a Kernel final-check client is installed, every
-    /// mutation fails closed with `AUTHORITY_CONTRACT_UNAVAILABLE`.
+    /// On Linux, mutation requires admitted Kernel UDS configuration, a
+    /// one-use permit, and matching online check and settlement. Missing or
+    /// invalid authority fails closed; non-Linux builds have no positive path.
     #[must_use]
     pub fn new() -> Self {
         Self {
             session: None,
-            authority: AuthorityGateway::unavailable(),
+            authority: AuthorityGateway::kernel(),
             mutation_frozen: false,
             #[cfg(feature = "fixture-authority")]
             fixture_root: None,
@@ -311,6 +232,7 @@ impl Daemon {
         let envelope = protocol::envelope(&req.token);
         let token = WireAuthorityToken::parse(&envelope.token).map_err(|e| auth(&e))?;
         let params: CloneParams = parse_params(&req.params)?;
+        self.authority.attach_ledger_root(Path::new(&params.root));
         #[cfg(feature = "fixture-authority")]
         if let Some(fixture_root) = &self.fixture_root {
             if !destination_is_fixture_root(Path::new(&params.root), fixture_root) {
@@ -358,6 +280,7 @@ impl Daemon {
                 "base_sha": repo.workspace().base_sha(),
                 "base_checkpoint_id": checkpoint.id,
                 "base_checkpoint_digest": checkpoint.digest,
+                "active_generation": repo.workspace().active_generation_binding(),
             });
             self.session = Some(Session {
                 repo,
@@ -417,7 +340,12 @@ impl Daemon {
                         Ok(json!({
                             "proposal_id": proposal_id,
                             "applied": applied,
-                            "checkpoint": checkpoint,
+                            "checkpoint": {
+                                "id": checkpoint.id,
+                                "digest": checkpoint.digest,
+                            },
+                            "repo_dir": session.repo.workspace().repo_dir(),
+                            "active_generation": session.repo.workspace().active_generation_binding(),
                         }))
                     });
                 self.settle_result(MutationOperation::ApplyPatch, pending, result)
@@ -540,121 +468,5 @@ impl Daemon {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn indeterminate_daemon_refuses_later_mutation_before_authority() {
-        let mut daemon = Daemon::new();
-        daemon.mutation_frozen = true;
-        let request = Request {
-            id: json!(1),
-            method: "apply_change".into(),
-            token: json!({"paseto": "never consulted"}),
-            params: json!({"patches": []}),
-        };
-        let token = WireAuthorityToken {
-            variant_id: "var_test".into(),
-            attempt_id: "atm_test".into(),
-            attempt_fence: 1,
-            workspace_nonce: [7; 32],
-        };
-        let error = match daemon.authorize_mutation(&request, MutationOperation::ApplyPatch, &token)
-        {
-            Ok(_) => panic!("frozen daemon returned a permit"),
-            Err(error) => error,
-        };
-        assert_eq!(error.0, "MUTATION_OUTCOME_UNKNOWN");
-    }
-
-    #[test]
-    fn malformed_apply_proposal_is_a_typed_bad_request() {
-        let bad = json!({
-            "proposal": {
-                "schema_version": 1,
-                "proposal_id": "cnt_short",
-                "producing_attempt_id": format!("atm_{}", "2".repeat(64)),
-                "base_checkpoint_id": format!("ckp_{}", "3".repeat(64)),
-                "base_checkpoint_digest": "4".repeat(64),
-                "operations": [],
-                "gate_ids": [format!("gat_{}", "5".repeat(64))]
-            }
-        });
-        let error = parse_params::<ApplyProposalParams>(&bad).expect_err("malformed refused");
-        assert_eq!(error.0, "BAD_REQUEST");
-    }
-
-    fn valid_prepare_params() -> Value {
-        json!({
-            "change": {
-                "id": format!("chg_{}", "1".repeat(64)),
-                "mission": "exact mission subject",
-                "acceptance_root": "2".repeat(64)
-            },
-            "provenance": {
-                "schema_version": 1,
-                "repository_id": format!("rep_{}", "3".repeat(64)),
-                "producing_attempt_id": format!("atm_{}", "4".repeat(64)),
-                "attempt_fence": 9,
-                "work_package_id": format!("wpk_{}", "5".repeat(64)),
-                "variant_id": format!("var_{}", "6".repeat(64)),
-                "plan_revision_id": format!("pln_{}", "7".repeat(64)),
-                "graph_revision_id": format!("grf_{}", "8".repeat(64)),
-                "base_checkpoint_id": format!("ckp_{}", "9".repeat(64)),
-                "base_commit": format!("sha1:{}", "a".repeat(40)),
-                "parent_candidate_ids": [format!("can_{}", "b".repeat(64))],
-                "granted_scope": ["src"],
-                "context_capsule_id": format!("cnt_{}", "c".repeat(64)),
-                "configuration_snapshot_id": format!("cnt_{}", "d".repeat(64)),
-                "policy_snapshot_id": format!("cnt_{}", "e".repeat(64)),
-                "routing_snapshot_id": format!("cnt_{}", "f".repeat(64)),
-                "environment_digest": "1".repeat(64),
-                "toolchain_digest": "2".repeat(64)
-            }
-        })
-    }
-
-    #[test]
-    fn prepare_candidate_requires_the_complete_strict_provenance_shape() {
-        parse_params::<PrepareParams>(&valid_prepare_params()).expect("strict params");
-
-        let legacy = json!({"change_seed": "demo", "mission": "synthetic"});
-        assert_eq!(
-            parse_params::<PrepareParams>(&legacy)
-                .expect_err("legacy shape refused")
-                .0,
-            "BAD_REQUEST"
-        );
-
-        let valid = valid_prepare_params();
-        let keys = valid["provenance"]
-            .as_object()
-            .expect("provenance object")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            let mut missing = valid.clone();
-            missing["provenance"]
-                .as_object_mut()
-                .expect("provenance object")
-                .remove(&key);
-            assert_eq!(
-                parse_params::<PrepareParams>(&missing)
-                    .expect_err("missing provenance refused")
-                    .0,
-                "BAD_REQUEST",
-                "field {key} received a default"
-            );
-        }
-
-        let mut unknown = valid;
-        unknown["provenance"]["model_commentary"] = json!("not authority");
-        assert_eq!(
-            parse_params::<PrepareParams>(&unknown)
-                .expect_err("unknown provenance refused")
-                .0,
-            "BAD_REQUEST"
-        );
-    }
-}
+#[path = "daemon/tests.rs"]
+mod tests;

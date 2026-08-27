@@ -12,8 +12,14 @@ Checkpoint, ProofRoot — with its typed IDs, framed digests, and the schema-1
 proposal (`crates/bullet-git-types`); the append-only CAS-first workspace
 journal and checkpoints (`crates/bullet-git-journal`); the sole-writer
 workspace daemon `bullet-gitd` behind a fail-closed authority gateway
-(`crates/bullet-gitd/src/authority_gateway.rs`: no positive checker exists, so
-a fresh daemon refuses `clone` with `AUTHORITY_CONTRACT_UNAVAILABLE`), a
+(`crates/bullet-gitd/src/authority_gateway.rs`: `Daemon::new()` installs the
+production Kernel checker; Linux mutation requires an explicitly configured,
+peer-authenticated Kernel UDS plus a one-use permit and exact online check and
+settlement. Missing required environment, malformed numeric UID/GID,
+non-Linux builds, and unsigned or legacy input refuse with
+`AUTHORITY_CONTRACT_UNAVAILABLE`; inadmissible configured sockets, peer
+mismatches, and transport or protocol failures refuse with
+`AUTHORITY_REFUSED`), a
 durable fsynced JSONL mutation ledger and bounded read-only recovery
 (`crates/bullet-gitd/src/mutation_ledger.rs`, `mutation_recovery.rs`: a
 reservation left in flight across restart is `MUTATION_OUTCOME_UNKNOWN` and
