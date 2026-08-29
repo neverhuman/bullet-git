@@ -341,6 +341,45 @@ fn tombstoned_objects_survive_gc_prune_now() {
     );
 }
 
+#[test]
+fn live_workspace_objects_survive_gc_prune_now() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("fixture-home");
+    let (src, base) = init_source(tmp.path());
+    let workspace = clone_workspace(tmp.path(), &src, &base, "atm_gc_live");
+    let repo = workspace.repo_dir();
+    let git = workspace.git();
+
+    let keep = write_dangling_blob(git, repo, "live-keep.bin", b"live-workspace-payload");
+    let drop = write_dangling_blob(git, repo, "eligible-drop.bin", b"eligible-payload");
+    let pin = RetentionPin {
+        oid: GitOid::from_hex(GitOidAlgorithm::Sha1, keep.clone()).expect("oid"),
+        class: RetentionClass::LiveWorkspace,
+    };
+    assert!(!RetentionClass::LiveWorkspace.may_prune());
+    assert_eq!(
+        RetentionClass::LiveWorkspace.retain_namespace(),
+        Some("refs/bullet/retain/live")
+    );
+    pin_retained_object(git, repo, &pin).expect("pin live workspace");
+    assert!(retention_ref_exists(git, repo, &pin).expect("retain ref"));
+
+    gc_prune_now(&home, repo).expect("hostile gc on the private clone");
+
+    git.run(
+        Some(repo),
+        FileProtocol::Never,
+        &["cat-file", "-e", &keep],
+        &[],
+    )
+    .expect("live-workspace object must survive prune");
+    assert!(
+        !git.probe(Some(repo), &["cat-file", "-e", &drop])
+            .expect("probe eligible"),
+        "unpinned dangling object should be pruned"
+    );
+}
+
 fn write_dangling_blob(
     git: &bullet_git_workspace::SafeGit,
     repo: &Path,

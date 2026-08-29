@@ -158,17 +158,13 @@ impl Daemon {
     }
 
     fn consume_permit(
-        &self,
+        &mut self,
         req: &Request,
         operation: MutationOperation,
         permit: MutationPermit,
     ) -> Result<PendingMutation, MethodError> {
-        let now = self
-            .authority
-            .now_unix_ms()
-            .map_err(|error| gateway(&error))?;
-        permit
-            .consume(operation, &req.token, &req.params, now)
+        self.authority
+            .consume(permit, operation, &req.token, &req.params)
             .map_err(|error| gateway(&error))
     }
 

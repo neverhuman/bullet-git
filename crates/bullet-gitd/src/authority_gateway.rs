@@ -52,7 +52,7 @@ pub(crate) struct VerifiedDecision {
     pub(crate) expires_at_unix_ms: u64,
 }
 
-/// Exact settlement submitted after the repository call has returned.
+/// Exact settlement after either a proven pre-I/O abort or repository return.
 pub(crate) struct FinalSettlementInput<'a> {
     pub(crate) subject: &'a MutationSubject,
     pub(crate) outcome: MutationOutcome,
@@ -88,14 +88,13 @@ pub(crate) struct MutationPermit {
 }
 
 impl MutationPermit {
-    /// Consume the permit immediately before its matching repository call.
-    pub(crate) fn consume(
-        self,
+    fn validate_immediately_before_repository(
+        &self,
         operation: MutationOperation,
         authority: &Value,
         params: &Value,
         now_unix_ms: u64,
-    ) -> Result<PendingMutation, GatewayError> {
+    ) -> Result<(), GatewayError> {
         let stripped = crate::kernel_permit::authority_without_permit(authority);
         let actual = transport_fingerprint(operation, &stripped, params)?;
         if self.operation != operation || self.transport_fingerprint != actual {
@@ -106,13 +105,29 @@ impl MutationPermit {
         if now_unix_ms >= self.expires_at_unix_ms {
             return Err(GatewayError::PermitExpired);
         }
-        Ok(PendingMutation {
+        Ok(())
+    }
+
+    fn into_pending(self) -> PendingMutation {
+        PendingMutation {
             subject: self.subject,
-        })
+        }
+    }
+
+    #[cfg(test)]
+    fn consume(
+        self,
+        operation: MutationOperation,
+        authority: &Value,
+        params: &Value,
+        now_unix_ms: u64,
+    ) -> Result<PendingMutation, GatewayError> {
+        self.validate_immediately_before_repository(operation, authority, params, now_unix_ms)?;
+        Ok(self.into_pending())
     }
 }
 
-/// Non-cloneable exact mutation that must be settled after repository execution.
+/// Non-cloneable reservation settled before I/O as aborted or after execution.
 #[must_use = "a consumed mutation permit must be settled"]
 pub(crate) struct PendingMutation {
     subject: MutationSubject,

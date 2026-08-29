@@ -1,4 +1,24 @@
 use super::*;
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+struct SequenceClock(Mutex<VecDeque<u64>>);
+
+impl SequenceClock {
+    fn new(times: impl IntoIterator<Item = u64>) -> Self {
+        Self(Mutex::new(times.into_iter().collect()))
+    }
+}
+
+impl Clock for SequenceClock {
+    fn now_unix_ms(&self) -> Result<u64, GatewayError> {
+        self.0
+            .lock()
+            .map_err(|_| GatewayError::Clock("sequence clock poisoned".into()))?
+            .pop_front()
+            .ok_or_else(|| GatewayError::Clock("sequence clock exhausted".into()))
+    }
+}
 
 #[test]
 fn unavailable_production_gateway_never_returns_a_permit() {
@@ -112,7 +132,7 @@ fn changed_fields_and_expiry_never_produce_a_consumable_permit() {
                 &WRITER_NONCE,
             )
             .expect("permit");
-        let error = match permit.consume(operation, &presented_authority, &presented_params, 101) {
+        let error = match live.consume(permit, operation, &presented_authority, &presented_params) {
             Ok(_) => panic!("changed request consumed"),
             Err(error) => error,
         };
@@ -147,6 +167,66 @@ fn changed_fields_and_expiry_never_produce_a_consumable_permit() {
     assert_eq!(
         digest_temp.path().read_dir().expect("ledger dir").count(),
         0
+    );
+    assert_expiry_after_reservation_is_aborted_and_restart_writable();
+}
+
+fn assert_expiry_after_reservation_is_aborted_and_restart_writable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let authority = serde_json::json!({"paseto": "fixture"});
+    let params = serde_json::json!({"path": "src/lib.rs"});
+    let mut live = AuthorityGateway {
+        checker: Box::new(FixedCheck {
+            subject: subject(),
+            expires_at_unix_ms: 200,
+            mutate_fingerprint: false,
+            settlement: SettlementBehavior::Exact,
+        }),
+        clock: Box::new(SequenceClock::new([100, 200, 201])),
+        ledger: Some(MutationLedger::open(temp.path()).expect("ledger")),
+        ledger_root: None,
+    };
+    let permit = live
+        .authorize(
+            MutationOperation::ApplyPatch,
+            &authority,
+            &params,
+            &subject().attempt_id,
+            subject().attempt_fence,
+            &WRITER_NONCE,
+        )
+        .expect("permit before expiry");
+    let error = match live.consume(permit, MutationOperation::ApplyPatch, &authority, &params) {
+        Ok(_) => panic!("expired permit reached repository I/O"),
+        Err(error) => error,
+    };
+    assert_eq!(error.reason_code(), "MUTATION_PERMIT_EXPIRED");
+    drop(live);
+
+    let record =
+        std::fs::read_to_string(temp.path().join(format!("{}.jsonl", subject().mutation_id)))
+            .expect("aborted record");
+    let events = record
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("event"))
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["event"], "reserved");
+    assert_eq!(events[1]["event"], "settled");
+    assert_eq!(events[1]["outcome"], "aborted");
+
+    let mut restarted = MutationLedger::open(temp.path()).expect("restart");
+    assert!(!restarted.recovery_status().is_frozen());
+    let next = MutationSubject {
+        mutation_id: format!("mut_{}", "d".repeat(64)),
+        reservation_id: format!("rsv_{}", "d".repeat(64)),
+        permit_nonce: "d".repeat(64),
+        permit_digest: "d".repeat(64),
+        ..subject()
+    };
+    assert_eq!(
+        restarted.reserve(&next).expect("new mutation after abort"),
+        crate::mutation_ledger::ReplayDisposition::Fresh
     );
 }
 

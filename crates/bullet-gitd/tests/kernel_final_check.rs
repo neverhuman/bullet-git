@@ -6,6 +6,7 @@ mod support;
 
 use bullet_git_types::framed_digest;
 use bullet_gitd::daemon::Daemon;
+use bullet_gitd::mutation_ledger::MutationLedger;
 use serde_json::Value;
 use std::env;
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -164,6 +165,35 @@ fn production_kernel_final_check_is_exact_bounded_and_fail_closed() {
         assert_eq!(events[1][field], settle[field], "ledger field {field}");
     }
     assert_eq!(events[1]["outcome"], "committed");
+
+    let expired_root = case.join("expired");
+    let expired_request = clone_request(&source, &base, &expired_root);
+    let expired_expected = Expected::new(&expired_request);
+    let expired_server = Server::start(Plan::Expired, expired_expected);
+    let expired_response = handle(&mut expired_server.daemon(), &expired_request);
+    assert_code(&expired_response, "MUTATION_PERMIT_EXPIRED");
+    let expired_requests = expired_server.finish();
+    assert_eq!(expired_requests.len(), 2);
+    assert_eq!(expired_requests[1]["params"]["outcome"], "aborted");
+    let expired_record = std::fs::read_to_string(
+        expired_root
+            .join(".bullet-mutation-ledger")
+            .join(format!("{MUTATION}.jsonl")),
+    )
+    .expect("expired settlement ledger");
+    let expired_events = expired_record
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("expired ledger row"))
+        .collect::<Vec<_>>();
+    assert_eq!(expired_events.len(), 2);
+    assert_eq!(expired_events[1]["outcome"], "aborted");
+    assert_eq!(expired_root.read_dir().expect("expired root").count(), 1);
+    assert!(
+        !MutationLedger::open(expired_root.join(".bullet-mutation-ledger"))
+            .expect("reopen expired ledger")
+            .recovery_status()
+            .is_frozen()
+    );
 
     let denied = server_case(
         &case,

@@ -1,4 +1,18 @@
 use super::*;
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+struct AbortClock(Mutex<VecDeque<u64>>);
+
+impl Clock for AbortClock {
+    fn now_unix_ms(&self) -> Result<u64, GatewayError> {
+        self.0
+            .lock()
+            .map_err(|_| GatewayError::Clock("abort clock poisoned".into()))?
+            .pop_front()
+            .ok_or_else(|| GatewayError::Clock("abort clock exhausted".into()))
+    }
+}
 
 #[test]
 fn exact_online_acknowledgment_durably_settles_consumed_permit() {
@@ -40,6 +54,7 @@ fn settlement_outage_or_changed_acknowledgment_is_unknown_and_stays_in_flight() 
         let replay = reopened.reserve(&subject()).expect_err("in flight");
         assert_eq!(replay.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
     }
+    assert_ambiguous_pre_repository_abort_latches_unknown();
 }
 
 #[test]
@@ -143,4 +158,58 @@ fn malformed_settlement_digest_never_reaches_online_or_local_success() {
         .settle(pending, MutationOutcome::Committed, &"A".repeat(64))
         .expect_err("uppercase digest");
     assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
+}
+
+fn assert_ambiguous_pre_repository_abort_latches_unknown() {
+    for behavior in [
+        SettlementBehavior::Refuse,
+        SettlementBehavior::ChangeMutation,
+        SettlementBehavior::ChangeReservation,
+        SettlementBehavior::ChangeDigest,
+        SettlementBehavior::ChangeFingerprint,
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let authority = serde_json::json!({"paseto": "fixture"});
+        let params = serde_json::json!({"path": "src/lib.rs"});
+        let mut live = AuthorityGateway {
+            checker: Box::new(FixedCheck {
+                subject: subject(),
+                expires_at_unix_ms: 200,
+                mutate_fingerprint: false,
+                settlement: behavior,
+            }),
+            clock: Box::new(AbortClock(Mutex::new([100, 200, 201].into()))),
+            ledger: Some(MutationLedger::open(temp.path()).expect("ledger")),
+            ledger_root: None,
+        };
+        let permit = live
+            .authorize(
+                MutationOperation::ApplyPatch,
+                &authority,
+                &params,
+                &subject().attempt_id,
+                subject().attempt_fence,
+                &WRITER_NONCE,
+            )
+            .expect("permit");
+        let error = match live.consume(permit, MutationOperation::ApplyPatch, &authority, &params) {
+            Ok(_) => panic!("ambiguous abort reached repository I/O"),
+            Err(error) => error,
+        };
+        assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
+        let error = refused(live.authorize(
+            MutationOperation::ApplyPatch,
+            &authority,
+            &params,
+            &subject().attempt_id,
+            subject().attempt_fence,
+            &WRITER_NONCE,
+        ));
+        assert_eq!(error.reason_code(), "MUTATION_OUTCOME_UNKNOWN");
+        drop(live);
+
+        let restarted = MutationLedger::open(temp.path()).expect("restart");
+        assert!(restarted.recovery_status().is_frozen());
+        assert_eq!(restarted.recovery_status().indeterminate().len(), 1);
+    }
 }

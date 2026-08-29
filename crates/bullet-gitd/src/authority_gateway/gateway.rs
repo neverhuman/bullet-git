@@ -69,13 +69,14 @@ impl AuthorityGateway {
                 "final-check response does not bind the exact writer incarnation".into(),
             ));
         }
-        let now = self.clock.now_unix_ms()?;
-        if now >= decision.expires_at_unix_ms {
-            return Err(GatewayError::PermitExpired);
-        }
-        if decision.expires_at_unix_ms - now > MAX_MUTATION_PERMIT_TTL_MS {
-            return Err(GatewayError::InvalidPermitWindow);
-        }
+        let window_refusal = match self.clock.now_unix_ms() {
+            Ok(now) if now >= decision.expires_at_unix_ms => Some(GatewayError::PermitExpired),
+            Ok(now) if decision.expires_at_unix_ms - now > MAX_MUTATION_PERMIT_TTL_MS => {
+                Some(GatewayError::InvalidPermitWindow)
+            }
+            Ok(_) => None,
+            Err(error) => Some(error),
+        };
         if self.ledger.is_none() {
             if let Some(root) = &self.ledger_root {
                 self.ledger = Some(MutationLedger::open(root.join(".bullet-mutation-ledger"))?);
@@ -84,17 +85,23 @@ impl AuthorityGateway {
         let ledger = self.ledger.as_mut().ok_or_else(|| {
             GatewayError::ContractUnavailable("durable authority ledger is unavailable".into())
         })?;
-        match ledger.reserve(&decision.subject)? {
-            ReplayDisposition::Fresh => Ok(MutationPermit {
+        let permit = match ledger.reserve(&decision.subject)? {
+            ReplayDisposition::Fresh => MutationPermit {
                 subject: decision.subject,
                 operation,
                 transport_fingerprint: fingerprint,
                 expires_at_unix_ms: decision.expires_at_unix_ms,
-            }),
-            ReplayDisposition::ExactReplay(_) => Err(GatewayError::Refused(
-                "settled replay returns its durable result, never another permit".into(),
-            )),
+            },
+            ReplayDisposition::ExactReplay(_) => {
+                return Err(GatewayError::Refused(
+                    "settled replay returns its durable result, never another permit".into(),
+                ));
+            }
+        };
+        if let Some(refusal) = window_refusal {
+            return Err(self.abort_before_repository(permit.into_pending(), refusal));
         }
+        Ok(permit)
     }
 
     fn recover_existing_ledger(&mut self) -> Result<(), GatewayError> {
@@ -120,11 +127,48 @@ impl AuthorityGateway {
         Ok(())
     }
 
-    pub(crate) fn now_unix_ms(&self) -> Result<u64, GatewayError> {
-        self.clock.now_unix_ms()
+    /// Rebind and consume immediately before repository I/O. A refusal after
+    /// durable reservation is a proven abort only when both settlements agree.
+    pub(crate) fn consume(
+        &mut self,
+        permit: MutationPermit,
+        operation: MutationOperation,
+        authority: &Value,
+        params: &Value,
+    ) -> Result<PendingMutation, GatewayError> {
+        let validation = self.clock.now_unix_ms().and_then(|now| {
+            permit.validate_immediately_before_repository(operation, authority, params, now)
+        });
+        match validation {
+            Ok(()) => Ok(permit.into_pending()),
+            Err(refusal) => Err(self.abort_before_repository(permit.into_pending(), refusal)),
+        }
     }
 
-    /// Settle one consumed permit against online authority and local replay state.
+    fn abort_before_repository(
+        &mut self,
+        pending: PendingMutation,
+        refusal: GatewayError,
+    ) -> GatewayError {
+        let subject = pending.subject.clone();
+        let result_digest = bullet_git_types::framed_digest(&[
+            b"bullet-gitd.pre-repository-abort.v1",
+            subject.operation.as_str().as_bytes(),
+            refusal.reason_code().as_bytes(),
+        ])
+        .to_hex();
+        match self.settle(pending, MutationOutcome::Aborted, &result_digest) {
+            Ok(()) => refusal,
+            Err(unknown) => {
+                if let Some(ledger) = self.ledger.as_mut() {
+                    let _ = ledger.reserve(&subject);
+                }
+                unknown
+            }
+        }
+    }
+
+    /// Settle one reserved operation against online authority and local replay state.
     ///
     /// Once repository execution has started, every refusal, outage, mismatch,
     /// or local persistence failure is UNKNOWN rather than a proven abort.

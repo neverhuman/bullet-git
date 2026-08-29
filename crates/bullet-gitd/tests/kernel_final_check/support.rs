@@ -128,6 +128,7 @@ impl Expected {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Plan {
     Exact,
+    Expired,
     Deny,
     DigestMismatch,
     WrongProto,
@@ -185,6 +186,10 @@ fn serve(listener: UnixListener, plan: Plan, expected: &Expected) -> Vec<Value> 
     let mut reply = check_reply(expected, checked_at);
     match plan {
         Plan::Exact => write_json(&mut stream, &reply, true),
+        Plan::Expired => {
+            reply["result"]["expires_at_unix_ms"] = json!(checked_at);
+            write_json(&mut stream, &reply, true);
+        }
         Plan::Deny => write_json(
             &mut stream,
             &json!({"proto": PROTO, "id": 1,
@@ -221,10 +226,15 @@ fn serve(listener: UnixListener, plan: Plan, expected: &Expected) -> Vec<Value> 
     }
     drop(stream);
     let mut requests = vec![check];
-    if plan == Plan::Exact {
+    if matches!(plan, Plan::Exact | Plan::Expired) {
         let mut stream = accept_bounded(&listener);
         let settle = read_bounded(&mut stream);
-        let (result, fingerprint) = validate_settle(&settle, expected, checked_at);
+        let outcome = if plan == Plan::Exact {
+            "committed"
+        } else {
+            "aborted"
+        };
+        let (result, fingerprint) = validate_settle(&settle, expected, checked_at, outcome);
         write_json(
             &mut stream,
             &json!({"proto": PROTO, "id": 1, "result": {
@@ -311,7 +321,12 @@ fn check_reply(expected: &Expected, now: u64) -> Value {
         "expires_at_unix_ms": now.checked_add(900).expect("expiry")}})
 }
 
-fn validate_settle(settle: &Value, expected: &Expected, checked_at: u64) -> (String, String) {
+fn validate_settle(
+    settle: &Value,
+    expected: &Expected,
+    checked_at: u64,
+    outcome: &str,
+) -> (String, String) {
     let rpc_now = settle["now_unix_ms"].as_u64().expect("settle RPC time");
     let params = &settle["params"];
     let completed = params["completed_at_unix_ms"]
@@ -322,18 +337,32 @@ fn validate_settle(settle: &Value, expected: &Expected, checked_at: u64) -> (Str
         .to_hex();
     assert!(checked_at <= completed && completed <= rpc_now);
     assert!(rpc_now <= now_ms().saturating_add(1_000));
-    let fingerprint = settlement_fingerprint(&expected.subject, &result, completed);
+    if outcome == "aborted" {
+        let abort_digest = framed_digest(&[
+            b"bullet-gitd.pre-repository-abort.v1",
+            b"clone-workspace",
+            b"MUTATION_PERMIT_EXPIRED",
+        ])
+        .to_hex();
+        assert_eq!(result, abort_digest);
+    }
+    let fingerprint = settlement_fingerprint(&expected.subject, outcome, &result, completed);
     assert_eq!(
         settle,
         &json!({"proto": PROTO, "id": 1, "method": "settle", "params": {
-            "subject": expected.subject, "outcome": "committed", "result_digest": result,
+            "subject": expected.subject, "outcome": outcome, "result_digest": result,
             "completed_at_unix_ms": completed, "settlement_fingerprint": fingerprint},
             "now_unix_ms": rpc_now})
     );
     (result, fingerprint)
 }
 
-fn settlement_fingerprint(subject: &MutationSubject, result: &str, completed: u64) -> String {
+fn settlement_fingerprint(
+    subject: &MutationSubject,
+    outcome: &str,
+    result: &str,
+    completed: u64,
+) -> String {
     let numbers = [
         subject.workspace_generation.to_string(),
         subject.attempt_fence.to_string(),
@@ -359,7 +388,7 @@ fn settlement_fingerprint(subject: &MutationSubject, result: &str, completed: u6
         numbers[3].as_bytes(),
         subject.permit_nonce.as_bytes(),
         subject.permit_digest.as_bytes(),
-        b"committed",
+        outcome.as_bytes(),
         result.as_bytes(),
         numbers[4].as_bytes(),
     ])
