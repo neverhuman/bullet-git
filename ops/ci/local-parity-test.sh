@@ -290,4 +290,48 @@ for tool in cargo cargo-nextest find id jq rustc wc; do
   }
 done
 
+# Exercise the actual helper's target and argv selection without running Cargo.
+fuzz_fixture="$(mktemp -d)"
+trap 'rm -rf -- "$fuzz_fixture"' EXIT
+mkdir -p "$fuzz_fixture/repo/ops/ci" "$fuzz_fixture/bin"
+cp ops/ci/fuzz.sh ops/ci/lib.sh "$fuzz_fixture/repo/ops/ci/"
+cat >"$fuzz_fixture/bin/cargo" <<'CARGO_FIXTURE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$CARGO_TARGET_DIR" "$@" >>"$CI_FUZZ_TRACE"
+exit "${CI_FUZZ_STATUS:-0}"
+CARGO_FIXTURE
+chmod +x "$fuzz_fixture/bin/cargo"
+fuzz_trace="$fuzz_fixture/trace"
+for selected in default private; do
+  parent="$fuzz_fixture/repo/target"
+  [[ "$selected" == default ]] || parent="$fuzz_fixture/private parent"
+  printf '%s\n' "$parent/fuzz-replay" test --locked --offline \
+    --manifest-path crates/bullet-git-workspace/fuzz/Cargo.toml --bin replay --quiet \
+    "$parent/fuzz-replay" run --locked --offline \
+    --manifest-path crates/bullet-git-workspace/fuzz/Cargo.toml --bin replay --quiet \
+    >"$fuzz_fixture/expected"
+  : >"$fuzz_trace"
+  (
+    unset CARGO_TARGET_DIR
+    [[ "$selected" == default ]] || export CARGO_TARGET_DIR="$parent"
+    PATH="$fuzz_fixture/bin:$PATH" CI_FUZZ_TRACE="$fuzz_trace" \
+      bash "$fuzz_fixture/repo/ops/ci/fuzz.sh" >/dev/null
+  )
+  cmp "$fuzz_fixture/expected" "$fuzz_trace" || {
+    echo '[ci] FUZZ_TARGET_OR_ARGV_DRIFT' >&2
+    exit 1
+  }
+done
+: >"$fuzz_trace"
+status=0
+CARGO_TARGET_DIR="$fuzz_fixture/private parent" PATH="$fuzz_fixture/bin:$PATH" \
+  CI_FUZZ_TRACE="$fuzz_trace" CI_FUZZ_STATUS=23 \
+  bash "$fuzz_fixture/repo/ops/ci/fuzz.sh" >/dev/null || status=$?
+[[ "$status" -eq 23 && "$(wc -l <"$fuzz_trace")" -eq 9 ]] || {
+  echo '[ci] FUZZ_FAILED_TEST_REACHED_RUN' >&2
+  exit 1
+}
+[[ ! -e "$fuzz_fixture/repo/target" && ! -e "$fuzz_fixture/private parent" ]]
+log "actual fuzz helper private/default target and exact Cargo argv controls passed"
 log "local parity controls passed"

@@ -8,7 +8,7 @@ cd "$REPO_ROOT"
 require_tool cargo || exit 1
 require_tool git || exit 1
 log "fuzz lane: replay checked-in corpora"
-export CARGO_TARGET_DIR="$REPO_ROOT/target/fuzz-replay"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/fuzz-replay"
 cargo test --locked --offline \
   --manifest-path crates/bullet-git-workspace/fuzz/Cargo.toml --bin replay --quiet
 cargo run --locked --offline \
