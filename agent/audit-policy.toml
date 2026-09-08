@@ -27,7 +27,11 @@ cost_surface = []
 # whose holder is gone. `fallback` is the stable serialized `CopyMode` name for
 # the bounded byte-identical copy path used only when Linux `FICLONE` does not
 # prove a reflink; hostile-PATH, cleanup, and GC-survival tests cover that path.
+# `temp` is the operating-system temporary directory used by
+# `tempfile::tempdir()` in daemon gateway tests, not deferred work.
+# `legacy` is the refusal text for an unsigned authority token that is not a
+# Kernel-issued mutation permit (`crates/bullet-gitd/src/kernel_permit.rs`).
 # Every other future-hostile term, the separate fallback-soup detector, and all
 # security detectors stay enforced.
 [dead_language]
-allow_terms = ["stale", "fallback"]
+allow_terms = ["stale", "fallback", "temp", "legacy"]

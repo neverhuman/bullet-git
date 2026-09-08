@@ -3,6 +3,37 @@
 use super::*;
 use crate::clone::PrivateClone;
 
+/// Non-constructible authorization to delete one exact workspace target.
+#[derive(Debug)]
+pub(crate) struct CleanupPermit {
+    pub(super) attempt_id: String,
+    pub(super) workspace_nonce_hex: String,
+    pub(super) work_dir: PathBuf,
+    pub(super) receipt_digest: Digest,
+    pub(super) destination: PathBuf,
+    pub(super) destination_device: u64,
+    pub(super) destination_inode: u64,
+    pub(super) artifact_digest: Digest,
+    pub(super) state: PreservationState,
+}
+
+impl CleanupPermit {
+    pub(crate) fn matches(&self, attempt_id: &str, nonce_hex: &str, work_dir: &Path) -> bool {
+        self.attempt_id == attempt_id
+            && self.workspace_nonce_hex == nonce_hex
+            && self.work_dir == work_dir
+    }
+    pub(crate) fn receipt_digest(&self) -> Digest {
+        self.receipt_digest
+    }
+    pub(crate) fn destination(&self) -> &Path {
+        self.destination.as_path()
+    }
+    pub(crate) fn artifact_digest(&self) -> Digest {
+        self.artifact_digest
+    }
+}
+
 pub(super) fn verify_salvage_objects(
     destination: &Path,
     state: &PreservationState,

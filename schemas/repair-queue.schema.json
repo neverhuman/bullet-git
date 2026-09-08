@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://git.neverhuman.org/schemas/bullet-git-repair-queue.schema.json",
+  "title": "bullet-git Jankurai repair-queue item",
+  "description": "One JSONL object from `.jankurai/repair-queue.jsonl` written by `ops/ci/audit.sh`.",
+  "type": "object",
+  "required": ["path", "priority", "task", "why"],
+  "properties": {
+    "path": { "type": "string" },
+    "priority": { "type": "string" },
+    "rule_id": { "type": "string" },
+    "tlr": { "type": "string" },
+    "lane": { "type": "string" },
+    "owner": { "type": "string" },
+    "task": { "type": "string" },
+    "why": { "type": "string" }
+  }
+}

@@ -1,5 +1,8 @@
 # bullet-git
 
+[![CI](https://img.shields.io/badge/ci-local%20required-green.svg)](docs/testing.md)
+[![Jankurai](https://img.shields.io/badge/jankurai-audit-blue.svg)](docs/testing.md)
+
 Agent-first repository kernel for Bullet Farm. Agents start at [`AGENTS.md`](AGENTS.md).
 
 ```text

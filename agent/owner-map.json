@@ -9,6 +9,7 @@
     ".jankurai/": "agent",
     "AGENTS.md": "agent",
     "CHANGELOG.md": "docs",
+    "CLAUDE.md": "agent",
     "Cargo.lock": "workspace",
     "Cargo.toml": "workspace",
     "Justfile": "ops",
@@ -18,11 +19,13 @@
     "SPLIT.md": "split",
     "agent/": "agent",
     "ci.toml": "ops",
+    "contracts/": "git",
     "crates/": "git",
     "deny.toml": "ops",
     "docs/": "docs",
     "ops/": "ops",
     "rust-toolchain.toml": "ops",
+    "schemas/": "agent",
     "scripts/": "ops",
     "tools/": "ops"
   }

@@ -33,6 +33,10 @@
       "command": "bash ops/ci/audit.sh",
       "purpose": "release language must stay evidence-backed and honestly blocked; the audit lane checks it"
     },
+    "CLAUDE.md": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "thin Claude adapter that only points at AGENTS.md"
+    },
     "Cargo.lock": {
       "command": "bash scripts/ci-local.sh fast",
       "purpose": "locked dependency graph"
@@ -64,6 +68,10 @@
     "ci.toml": {
       "command": "bash scripts/ci-local.sh lint",
       "purpose": "inactive forge-neutral Jeryu graph invoking the same local lanes; no runner is registered"
+    },
+    "contracts/": {
+      "command": "bash scripts/ci-local.sh contract",
+      "purpose": "Hub-synced schema bundle; regenerate from the farm sync script, never hand-edit"
     },
     "crates/": {
       "command": "cargo test --workspace",
@@ -108,6 +116,10 @@
     "rust-toolchain.toml": {
       "command": "bash scripts/ci-local.sh required",
       "purpose": "pinned Rust toolchain; the required lane builds and lints with it"
+    },
+    "schemas/": {
+      "command": "bash ops/ci/audit.sh",
+      "purpose": "machine-readable shapes of the audit-lane repo-score and repair-queue artifacts"
     },
     "scripts/ci-doctor.sh": {
       "command": "bash scripts/ci-doctor.sh fast",
