@@ -24,7 +24,7 @@ stage_root="$stage_parent/$lane"
 mkdir -p -- "$stage_parent"
 chmod 700 -- "$stage_parent"
 rm -rf -- "$stage_root"
-mkdir -m 700 -- "$stage_root/observations"
+mkdir -m 700 -- "$stage_root" "$stage_root/observations"
 
 copy_path() {
   local source="$1" relative destination

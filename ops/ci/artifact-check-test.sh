@@ -110,4 +110,69 @@ make_scheduled_fixture coverage
 jq '.artifact_hashes=[]' "$test_root/observations/coverage.json" >"$test_root/x"
 mv "$test_root/x" "$test_root/observations/coverage.json"
 expect_failure CI_ARTIFACT_INVENTORY_INVALID coverage
+
+# Exercise the actual stage/checker scripts without writing canonical diagnostics.
+# The fixture only reads this immutable commit through the checker; its artifacts
+# and upload tree are private, and no Git command mutates the shared directory.
+make_fixture
+fixture="$test_root/staging"
+mkdir -p "$fixture/ops/ci" "$fixture/.ci-artifacts/observations" "$test_root/outside"
+cp ops/ci/lib.sh ops/ci/artifact-check.sh ops/ci/stage-artifacts.sh "$fixture/ops/ci/"
+ln -s "$REPO_ROOT/.git" "$fixture/.git"
+input="$fixture/.ci-artifacts/observations/source-scan.json"
+jq '.commands=["bash scripts/ci-doctor.sh source-scan","bash ops/ci/source-scan.sh"] |
+  .outcomes=[{lane:"source-scan",status:"PASS",exit_code:0}] | .artifact_hashes=[]' \
+  "$test_root/observations/fast.json" >"$input"
+cp "$input" "$test_root/source-scan.json"
+stage="$fixture/target/ci-upload/source-scan"
+
+stage_refuses() {
+  local reason="$1" output
+  if output="$(bash "$fixture/ops/ci/stage-artifacts.sh" source-scan "$commit" 2>&1)"; then
+    echo '[ci] INVALID_STAGE_ACCEPTED' >&2
+    exit 1
+  fi
+  [[ "$output" == *"$reason"* ]] || {
+    printf '[ci] stage did not refuse %s: %s\n' "$reason" "$output" >&2
+    exit 1
+  }
+}
+
+bash "$fixture/ops/ci/stage-artifacts.sh" source-scan "$commit" >/dev/null
+for path in "$fixture/target/ci-upload" "$stage" "$stage/observations"; do
+  [[ "$(find "$path" -maxdepth 0 -type d -perm 0700 -print)" == "$path" ]]
+done
+[[ "$(find "$stage/observations/source-scan.json" -maxdepth 0 -type f -perm 0600 -print)" \
+  == "$stage/observations/source-scan.json" ]]
+cmp "$input" "$stage/observations/source-scan.json"
+cmp "$input" "$test_root/source-scan.json"
+printf 'stale\n' >"$stage/stale.log"
+bash "$fixture/ops/ci/stage-artifacts.sh" source-scan "$commit" >/dev/null
+[[ ! -e "$stage/stale.log" ]]
+cmp "$input" "$stage/observations/source-scan.json"
+
+jq '.clean=false' "$test_root/source-scan.json" >"$input"
+stage_refuses CI_OBSERVATION_INVALID
+cmp "$test_root/source-scan.json" "$stage/observations/source-scan.json"
+rm "$input"
+ln -s "$test_root/source-scan.json" "$input"
+stage_refuses CI_OBSERVATION_INVALID
+cmp "$test_root/source-scan.json" "$stage/observations/source-scan.json"
+rm "$input"
+cp "$test_root/source-scan.json" "$input"
+printf 'retain-outside\n' >"$test_root/outside/marker"
+for relative in target target/ci-upload target/ci-upload/source-scan; do
+  rm -rf -- "$fixture/target"
+  mkdir -p "$(dirname "$fixture/$relative")"
+  ln -s "$test_root/outside" "$fixture/$relative"
+  stage_refuses CI_STAGE_ROOT_INVALID
+  [[ -L "$fixture/$relative" && "$(cat "$test_root/outside/marker")" == retain-outside ]]
+done
+rm -rf -- "$fixture/target" "$fixture/.ci-artifacts"
+mkdir "$fixture/.ci-artifacts"
+cp -R "$test_root/observations" "$test_root/reports" "$fixture/.ci-artifacts/"
+bash "$fixture/ops/ci/stage-artifacts.sh" fast "$commit" >/dev/null
+cmp "$test_root/observations/fast.json" "$fixture/target/ci-upload/fast/observations/fast.json"
+cmp "$test_root/reports/fast.junit.xml" "$fixture/target/ci-upload/fast/reports/fast.junit.xml"
+log "actual staging exact bytes, private modes, retry, and refusal preservation passed"
 log "artifact checker exact-subject, hash, tree, and sanitizer guards passed"
