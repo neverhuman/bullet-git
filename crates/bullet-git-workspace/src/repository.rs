@@ -66,6 +66,19 @@ pub trait AgentRepository {
         proposal: &PatchProposal,
     ) -> Result<Checkpoint, CapabilityError>;
 
+    /// Read-only refusal check for one proposal. Daemon dispatch calls this
+    /// before consuming a one-use mutation permit.
+    ///
+    /// # Errors
+    ///
+    /// Returns authority, proposal, checkpoint, preimage, or scope refusals
+    /// without publishing a generation.
+    fn validate_proposal(
+        &self,
+        auth: &AuthorityEnvelope,
+        proposal: &PatchProposal,
+    ) -> Result<(), CapabilityError>;
+
     /// Checkpoint the journal and the working tree without touching the live
     /// index (temporary `GIT_INDEX_FILE`).
     ///
