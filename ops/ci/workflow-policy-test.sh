@@ -215,8 +215,8 @@ required_definition="$(<"$required")"
 scheduled_definition="$(<"$scheduled")"
 required_job_ids=$'source_scan\nfast\nlint\ncontract\nsecurity\ndocs\nrequired'
 scheduled_job_ids=$'source_scan\nhistory\nlinks\nadvisory\ncoverage\nmacos\nwindows\naudit'
-required_workflow_hash=aab8fea7656420a66897aef2eca86362dc7d04fcc81b12354f222f14f5b3d737
-scheduled_workflow_hash=74d2f0e3a174ca1e90c98083518d1eebc862493d68ebce391b79e44442b2cf5d
+required_workflow_hash=1ab3fd8187163a80247fe238d4a578f6777046bd4c875c5aa2f595897bf91425
+scheduled_workflow_hash=9ed6665f3f184c8bc32590dbf230e59ed313602f61a96caf4481ed3b548cd3c7
 exact_workflow_inventory "$required_definition" "$required_job_ids" 6 1 "$required_workflow_hash" || {
   echo '[ci] REQUIRED_WORKFLOW_INVENTORY_DRIFT' >&2
   exit 1
