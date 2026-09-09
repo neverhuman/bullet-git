@@ -1,0 +1,87 @@
+# Canonical proof lanes. Hosted workflows and inactive `ci.toml` jobs invoke
+# these same local entrypoints. Missing tools, zero-test partitions, skipped
+# jobs, absent observations, and unregistered live work never translate to green.
+
+[[lane]]
+name = "source-scan"
+command = "bash scripts/ci-local.sh source-scan"
+purpose = "current-tree gitleaks admission before project dependency installation"
+requires_network = false
+
+[[lane]]
+name = "fast"
+command = "just fast"
+purpose = "43-case nonzero types/journal nextest partition with sanitized JUnit"
+requires_network = false
+
+[[lane]]
+name = "lint"
+command = "just lint"
+purpose = "format, Clippy, actionlint 1.7.8, zizmor 1.25.2, ShellCheck 0.10.0, partition and aggregator meta-guards"
+requires_network = false
+
+[[lane]]
+name = "contract"
+command = "just contract"
+purpose = "126-case nonzero workspace/daemon partition plus six exact corpus-replay outcomes for patch and local-config oracles"
+requires_network = false
+
+[[lane]]
+name = "security"
+command = "just security"
+purpose = "secret-shaped canary plus cargo-deny licenses, advisories, bans, and sources for the workspace and corpus harness locks with a fresh RustSec database"
+requires_network = true
+
+[[lane]]
+name = "docs"
+command = "just docs"
+purpose = "relative Markdown links, warning-denied rustdoc, and doctests"
+requires_network = false
+
+[[lane]]
+name = "required"
+command = "just required"
+purpose = "source admission followed by fast, lint, contract, security, and docs sequentially exactly once"
+requires_network = true
+
+[[lane]]
+name = "audit"
+command = "just audit"
+purpose = "local Jankurai full-score ratchet with JSON, Markdown, and repair-queue artifacts under .jankurai/"
+requires_network = false
+
+[[lane]]
+name = "nightly"
+command = "just nightly"
+purpose = "explicit live jeryu-gitd oracle entrypoint; exit 78 means unregistered, never success"
+requires_network = false
+
+[[lane]]
+name = "history"
+command = "bash scripts/ci-local.sh history"
+purpose = "scheduled full-history gitleaks diagnostic over a non-shallow checkout"
+requires_network = false
+
+[[lane]]
+name = "links"
+command = "bash scripts/ci-local.sh links"
+purpose = "scheduled external-link reachability diagnostic with nonempty inventory"
+requires_network = true
+
+[[lane]]
+name = "advisory"
+command = "bash scripts/ci-local.sh advisory"
+purpose = "scheduled RustSec refresh, freshness admission, and advisory-only scan"
+requires_network = true
+
+[[lane]]
+name = "coverage"
+command = "bash scripts/ci-local.sh coverage"
+purpose = "scheduled full-workspace LCOV diagnostic through nextest"
+requires_network = false
+
+[[lane]]
+name = "platform"
+command = "bash scripts/ci-local.sh platform"
+purpose = "macOS/Windows all-target compile plus existing AUTHORITY_CONTRACT_UNAVAILABLE zero-mutation test"
+requires_network = false

@@ -1,0 +1,141 @@
+{
+  "workspace": "bullet-git",
+  "tests": {
+    ".bullet-family/": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "gitignored local output of the family toolchain lane; no committed source lives here, so the canonical required lane is the proof for the tree it reports on"
+    },
+    ".config/": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "nextest profiles and JUnit destinations used by the disjoint fast and contract partitions"
+    },
+    ".github/": {
+      "command": "bash scripts/ci-local.sh lint",
+      "purpose": "actionlint, zizmor, and workflow policy prove hosted jobs match local scripts and converge fail closed"
+    },
+    ".gitignore": {
+      "command": "bash scripts/ci-local.sh lint",
+      "purpose": "ignored diagnostic-output policy and workflow/source meta-controls"
+    },
+    ".ci-artifacts/": {
+      "command": "bash ops/ci/artifact-check.sh fast",
+      "purpose": "ignored unsigned CI observations and sanitized reports; the producing lane regenerates them"
+    },
+    ".jankurai/": {
+      "command": "bash ops/ci/audit.sh",
+      "purpose": "gitignored audit lane output; the audit lane regenerates it from the pinned local auditor"
+    },
+    "AGENTS.md": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "agent entrypoint; the fast lane proves the commands it names"
+    },
+    "CHANGELOG.md": {
+      "command": "bash ops/ci/audit.sh",
+      "purpose": "release language must stay evidence-backed and honestly blocked; the audit lane checks it"
+    },
+    "CLAUDE.md": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "thin Claude adapter that only points at AGENTS.md"
+    },
+    "Cargo.lock": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "locked dependency graph"
+    },
+    "Cargo.toml": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "workspace manifest"
+    },
+    "Justfile": {
+      "command": "bash scripts/ci-local.sh lint",
+      "purpose": "command surface and source-before-fetch ordering; local parity checks every canonical recipe"
+    },
+    "LICENSE": {
+      "command": "test -s LICENSE",
+      "purpose": "license text; no executable proof"
+    },
+    "README.md": {
+      "command": "bash scripts/ci-local.sh fast",
+      "purpose": "documentation; the fast lane proves the commands it names"
+    },
+    "SPLIT.md": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "split-family contract; the required lane is the check it names"
+    },
+    "agent/": {
+      "command": "bash ops/ci/audit.sh",
+      "purpose": "Jankurai metadata; the audit lane validates it"
+    },
+    "ci.toml": {
+      "command": "bash scripts/ci-local.sh lint",
+      "purpose": "inactive forge-neutral Jeryu graph invoking the same local lanes; no runner is registered"
+    },
+    "contracts/": {
+      "command": "bash scripts/ci-local.sh contract",
+      "purpose": "Hub-synced schema bundle; regenerate from the farm sync script, never hand-edit"
+    },
+    "crates/": {
+      "command": "cargo test --workspace",
+      "purpose": "prove Change/Candidate, capability API, journal, and proof roots"
+    },
+    "crates/bullet-git-workspace/": {
+      "command": "cargo test -p bullet-git-workspace",
+      "purpose": "prove SafeGit isolation, private clone lifecycle, scope enforcement, and receipt-gated cleanup against real Git fixtures"
+    },
+    "crates/bullet-git-workspace/fuzz/": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "the required contract sub-step replays the six exact corpus outcomes; lint checks the standalone manifest with fmt and strict Clippy, and security audits its independent lock under deny.toml"
+    },
+    "crates/bullet-gitd/": {
+      "command": "cargo test -p bullet-gitd",
+      "purpose": "prove unavailable authority prevents production mutation, private permits bind exact calls, durable replay fails closed, and stdio frames remain bounded"
+    },
+    "deny.toml": {
+      "command": "bash scripts/ci-local.sh security",
+      "purpose": "cargo-deny ban policy; the security lane is the check that reads it"
+    },
+    "docs/": {
+      "command": "bash scripts/ci-local.sh docs",
+      "purpose": "architecture, testing, and release contracts; relative links, rustdoc, and doctests fail closed"
+    },
+    "docs/architecture.md": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "daemon trust-boundary contract checked with the required implementation proof"
+    },
+    "mutants.toml": {
+      "command": "bash ops/ci/mutants.sh --baseline",
+      "purpose": "prove the mutation examine list is pinned; this command is not a mutation-score receipt"
+    },
+    "ops/": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "atomic lane implementations, meta-guards, source admission, and sequential local convergence"
+    },
+    "ops/ci/mutants.sh": {
+      "command": "bash ops/ci/mutants.sh --baseline",
+      "purpose": "prove the L-16a baseline helper is executable and structurally closed"
+    },
+    "rust-toolchain.toml": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "pinned Rust toolchain; the required lane builds and lints with it"
+    },
+    "schemas/": {
+      "command": "bash ops/ci/audit.sh",
+      "purpose": "machine-readable shapes of the audit-lane repo-score and repair-queue artifacts"
+    },
+    "scripts/ci-doctor.sh": {
+      "command": "bash scripts/ci-doctor.sh fast",
+      "purpose": "fail-closed admission of the pinned local tools used by the deterministic fast lane"
+    },
+    "scripts/ci-local.sh": {
+      "command": "bash scripts/ci-local.sh required",
+      "purpose": "canonical local lane dispatcher exercised by the required lane"
+    },
+    "scripts/ci-observation.sh": {
+      "command": "bash scripts/ci-local.sh lint",
+      "purpose": "emit and validate unsigned bullet.ci-observation.v1 diagnostics without timestamps or raw logs"
+    },
+    "tools/": {
+      "command": "bash scripts/ci-local.sh security",
+      "purpose": "canonical Jankurai lane adapters; they delegate to the exact ops/ci lane script they name"
+    }
+  }
+}

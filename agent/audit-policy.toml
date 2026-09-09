@@ -1,0 +1,37 @@
+# Jankurai audit policy. The thresholds are the auditor defaults and are kept
+# explicit so nothing here weakens the decision: standard mode still fails under
+# 85 and still treats critical and high findings as hard. `ops/ci/audit.sh` is the
+# executable lane and applies its own upward-only AUDIT_FLOOR ratchet on top.
+minimum_score = 85
+fail_on = ["critical", "high"]
+advisory_on = ["medium", "low"]
+
+# Explicit cost-surface enumeration for HLT-026-COST-BUDGET-GAP. This component
+# calls no provider, model, or metered API from any lane: every lane is local and
+# offline, and the word "token" in this repository is an authority token, not an
+# API billing unit. The enforced time and containment budgets are documented in
+# docs/testing.md ("Budgets and stop conditions").
+cost_surface = []
+
+# Accepted false positives for HLT-001-DEAD-MARKER.
+#
+# `stale` is not a dead-code marker in this component: it is wire-contract
+# vocabulary. `AuthorityError::StaleAuthority` renders the stable machine
+# reason code `STALE_AUTHORITY` (crates/bullet-git-types/src/authority.rs),
+# and `WorkspaceError::StaleProposalCheckpoint` / `StaleProposalPreimage`
+# render `STALE_PROPOSAL_CHECKPOINT` / `STALE_PROPOSAL_PREIMAGE`
+# (crates/bullet-git-workspace/src/lib.rs). Those codes are consumed by
+# bullet-kernel and the daemon protocol, so renaming them would break the
+# contract, not clean up dead language. `lock_is_stale` in
+# crates/bullet-git-workspace/src/mirror.rs is the same domain word: a lock file
+# whose holder is gone. `fallback` is the stable serialized `CopyMode` name for
+# the bounded byte-identical copy path used only when Linux `FICLONE` does not
+# prove a reflink; hostile-PATH, cleanup, and GC-survival tests cover that path.
+# `temp` is the operating-system temporary directory used by
+# `tempfile::tempdir()` in daemon gateway tests, not deferred work.
+# `legacy` is the refusal text for an unsigned authority token that is not a
+# Kernel-issued mutation permit (`crates/bullet-gitd/src/kernel_permit.rs`).
+# Every other future-hostile term, the separate fallback-soup detector, and all
+# security detectors stay enforced.
+[dead_language]
+allow_terms = ["stale", "fallback", "temp", "legacy"]

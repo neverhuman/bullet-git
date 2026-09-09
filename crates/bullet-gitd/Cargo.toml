@@ -1,0 +1,40 @@
+[package]
+name = "bullet-gitd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+autobins = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+fixture-authority = []
+
+[[bin]]
+name = "bullet-gitd"
+path = "src/main.rs"
+
+[[bin]]
+name = "bullet-gitd-fixture"
+path = "src/bin/fixture_main.rs"
+required-features = ["fixture-authority"]
+
+[dependencies]
+bullet-git-types.workspace = true
+bullet-git-journal.workspace = true
+bullet-git-workspace.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["event", "net", "time"] }
+
+[dev-dependencies]
+hex.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

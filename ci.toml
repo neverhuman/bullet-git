@@ -1,0 +1,76 @@
+# Prepared Jeryu-native graph. Every declared job lists the typed exit-78 gate
+# first, but the current compiler or runner may reject unsupported topology or
+# artifacts before command execution. Dispatch remains fail-closed until
+# source-forge ratification, immutable provisioning, runner activation, and
+# protected-context API read-back exist. This file registers nothing.
+
+[[job]]
+id = "activation"
+name = "prepared activation refusal"
+runner_class = "native-rust-clean"
+run = ["bash ops/ci/jeryu-activation-gate.sh"]
+cache_mounts = []
+artifact_paths = []
+
+[[job]]
+id = "source_scan"
+name = "source scan"
+runner_class = "native-rust-clean"
+needs = ["activation"]
+run = ["bash ops/ci/jeryu-activation-gate.sh", "bash scripts/ci-local.sh source-scan"]
+cache_mounts = []
+artifact_paths = [".ci-artifacts/observations/source-scan.json"]
+
+[[job]]
+id = "fast"
+name = "fast"
+runner_class = "native-rust-clean"
+needs = ["source_scan"]
+run = ["bash ops/ci/jeryu-activation-gate.sh", "bash scripts/ci-local.sh fast"]
+cache_mounts = []
+artifact_paths = [".ci-artifacts/observations/fast.json", ".ci-artifacts/reports/fast.junit.xml"]
+
+[[job]]
+id = "lint"
+name = "lint"
+runner_class = "native-rust-clean"
+needs = ["source_scan"]
+run = ["bash ops/ci/jeryu-activation-gate.sh", "bash scripts/ci-local.sh lint"]
+cache_mounts = []
+artifact_paths = [".ci-artifacts/observations/lint.json"]
+
+[[job]]
+id = "contract"
+name = "contract"
+runner_class = "native-rust-clean"
+needs = ["source_scan"]
+run = ["bash ops/ci/jeryu-activation-gate.sh", "bash scripts/ci-local.sh contract"]
+cache_mounts = []
+artifact_paths = [".ci-artifacts/observations/contract.json", ".ci-artifacts/reports/contract.junit.xml"]
+
+[[job]]
+id = "security"
+name = "security"
+runner_class = "native-rust-clean"
+needs = ["source_scan"]
+run = ["bash ops/ci/jeryu-activation-gate.sh", "bash scripts/ci-local.sh security"]
+cache_mounts = []
+artifact_paths = [".ci-artifacts/observations/security.json"]
+
+[[job]]
+id = "docs"
+name = "docs"
+runner_class = "native-rust-clean"
+needs = ["source_scan"]
+run = ["bash ops/ci/jeryu-activation-gate.sh", "bash scripts/ci-local.sh docs"]
+cache_mounts = []
+artifact_paths = [".ci-artifacts/observations/docs.json"]
+
+[[job]]
+id = "required"
+name = "CI / required"
+runner_class = "native-rust-clean"
+needs = ["source_scan", "fast", "lint", "contract", "security", "docs"]
+run = ["bash ops/ci/jeryu-activation-gate.sh", "bash ops/ci/jeryu-required.sh"]
+cache_mounts = []
+artifact_paths = []

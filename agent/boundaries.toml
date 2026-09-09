@@ -1,0 +1,48 @@
+[stack]
+id = "rust-ts-vite-react-sqlite"
+version = "0.4.0"
+
+# BulletGit is a Rust-only component. `crates/bullet-git-types` is the pure typed
+# core: identities, framed digests, the schema-1 proposal, and typed authority
+# errors. It must stay free of filesystem, process, clock, network, and RNG
+# access so every identity stays reproducible from its inputs alone. The
+# filesystem and process surfaces live in `bullet-git-journal`,
+# `bullet-git-workspace`, and `bullet-gitd`, which are not domain paths.
+[rust]
+domain_paths = ["crates/bullet-git-types/src"]
+forbidden_domain_imports = [
+  "std::fs",
+  "std::env",
+  "std::net",
+  "std::process",
+  "std::time::SystemTime",
+  "rand::",
+  "sqlx::",
+  "reqwest::"
+]
+
+# No TypeScript, web, or Python surface exists in this repository; the operations
+# portal lives in bullet-portal and the control plane in bullet-kernel.
+[typescript]
+web_paths = []
+forbidden_web_imports = []
+generated_contract_paths = []
+
+[python]
+allowed_truth_paths = []
+
+# No queue or event-bus adapter surface. The only generated type zone is the
+# hub-synced schema bundle declared in agent/generated-zones.toml.
+[queues]
+adapter_paths = []
+event_contract_paths = []
+generated_type_paths = ["contracts/generated/rust/schema_bundle.rs"]
+client_markers = []
+
+# No database runtime: durable truth is the append-only CAS-first journal and the
+# fsynced JSONL mutation ledger, not SQL.
+[db]
+root_paths = []
+migration_paths = []
+constraint_paths = []
+schema_version = "not-applicable"

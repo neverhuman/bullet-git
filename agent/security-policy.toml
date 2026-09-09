@@ -1,0 +1,10 @@
+# Security and source-policy tools used by the source-scan, lint, and security
+# lanes. Every required tool is version-admitted by `scripts/ci-doctor.sh` and
+# missing tools fail closed.
+schema_version = "1.0.0"
+enabled_tools = ["actionlint", "cargo-deny", "gitleaks", "shellcheck", "zizmor"]
+required_tools = ["actionlint", "cargo-deny", "gitleaks", "shellcheck", "zizmor"]
+advisory_tools = []
+
+[severity_thresholds]
+fail_lane_on = "high"

@@ -1,0 +1,32 @@
+{
+  "workspace": "bullet-git",
+  "owners": {
+    ".bullet-family/": "ops",
+    ".ci-artifacts/": "ops",
+    ".config/": "ops",
+    ".github/": "ops",
+    ".gitignore": "ops",
+    ".jankurai/": "agent",
+    "AGENTS.md": "agent",
+    "CHANGELOG.md": "docs",
+    "CLAUDE.md": "agent",
+    "Cargo.lock": "workspace",
+    "Cargo.toml": "workspace",
+    "Justfile": "ops",
+    "LICENSE": "workspace",
+    "mutants.toml": "ops",
+    "README.md": "docs",
+    "SPLIT.md": "split",
+    "agent/": "agent",
+    "ci.toml": "ops",
+    "contracts/": "git",
+    "crates/": "git",
+    "deny.toml": "ops",
+    "docs/": "docs",
+    "ops/": "ops",
+    "rust-toolchain.toml": "ops",
+    "schemas/": "agent",
+    "scripts/": "ops",
+    "tools/": "ops"
+  }
+}
