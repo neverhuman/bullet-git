@@ -4,7 +4,9 @@ mod binding;
 #[path = "generation_store.rs"]
 mod store;
 pub use binding::{ActiveGenerationBinding, GenerationParentBinding};
-pub(crate) use store::{GenerationBoundary, GenerationFaults}; // test + store impl API
+#[cfg(test)]
+pub(crate) use store::GenerationBoundary;
+pub(crate) use store::GenerationFaults;
 
 use crate::tree_copy::{
     allocate_pointer_stage, allocate_staging, copy_tree, create_directory,

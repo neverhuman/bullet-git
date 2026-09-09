@@ -65,8 +65,6 @@ lanes in parallel, and converges their exact-run observations and sanitized
 reports at `CI / required`; it never reruns the local `required` wrapper.
 Hosted tools pin rustc 1.97.1, cargo-nextest 0.9.137, cargo-deny 0.19.8,
 gitleaks 8.21.2, actionlint 1.7.8, zizmor 1.25.2, and ShellCheck 0.10.0.
-JeRyu currently admits `jankurai/proof` on push (the hosted audit lane). The
-member `ci.yml` required aggregator, nightly, and `toolchain-msrv` remain
-local-only until those workflows are admitted. Local runners use
+Audit, nightly, and `toolchain-msrv` remain local-only lanes. Local runners use
 `scripts/ci-doctor.sh <lane>` for exact tool admission. Lane rules are in
 [`ops/AGENTS.md`](ops/AGENTS.md).

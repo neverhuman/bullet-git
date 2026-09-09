@@ -3,3 +3,4 @@
 .bullet-family/
 .DS_Store
 .jankurai/
+/crates/bullet-git-workspace/fuzz/target
