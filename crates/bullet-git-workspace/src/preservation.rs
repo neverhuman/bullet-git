@@ -323,3 +323,70 @@ impl PreservationAuthority {
         })
     }
 }
+
+/// Non-cloneable proof that one sealed receipt authorizes exactly one cleanup.
+///
+/// Only [`PreservationAuthority::authorize_receipt`] constructs this value,
+/// and it runs the identical checks the sealed-cleanup path already ran:
+/// seal validity, receipt subject against the live workspace, cleanup
+/// target, destination identity, artifact shape, salvage objects, bundle,
+/// and artifact digest. The seal is the authority — it proves that this
+/// daemon session, over this exact workspace, issued this receipt.
+#[derive(Debug)]
+pub struct AuthorizedCleanup {
+    permit: CleanupPermit,
+}
+
+impl AuthorizedCleanup {
+    /// Digest of the exact sealed receipt token that authorized this cleanup.
+    #[must_use]
+    pub fn receipt_digest(&self) -> Digest {
+        self.permit.receipt_digest()
+    }
+
+    /// Delete only the workspace this verified receipt names.
+    ///
+    /// Revalidation is still colocated with the first delete syscall, so a
+    /// workspace or artifact that changes after authorization is refused
+    /// rather than deleted.
+    ///
+    /// # Errors
+    ///
+    /// `PRESERVATION_RECEIPT_REFUSED` when the workspace, artifact, or
+    /// destination changed after authorization. Once deletion has started,
+    /// any failure is `PRESERVATION_OUTCOME_UNKNOWN`.
+    pub fn cleanup(
+        self,
+        repository: &mut RealRepository,
+        deleted_at: &str,
+    ) -> Result<PathBuf, CapabilityError> {
+        repository.workspace_mut().cleanup(self.permit, deleted_at)
+    }
+}
+
+impl PreservationAuthority {
+    /// Verify a sealed receipt without consulting any external authority.
+    ///
+    /// Cleanup is receipt-gated: the writer lease that authorized the attempt
+    /// is terminal by protocol once the attempt has succeeded, so the sealed
+    /// receipt this session issued — not a lease read-back — authorizes the
+    /// deletion. Callers verify the receipt before minting any local
+    /// reservation, so a forged, foreign, or stale receipt never reserves.
+    ///
+    /// # Errors
+    ///
+    /// `PRESERVATION_RECEIPT_REFUSED` when the seal, the receipt subject, the
+    /// cleanup target, the destination identity, or the preserved artifact
+    /// does not match this workspace, plus the typed corruption and I/O
+    /// failures raised while reading the artifact.
+    pub fn authorize_receipt(
+        &self,
+        repository: &RealRepository,
+        auth: &AuthorityEnvelope,
+        token: &str,
+    ) -> Result<AuthorizedCleanup, CapabilityError> {
+        Ok(AuthorizedCleanup {
+            permit: self.authorize_cleanup(repository, auth, token)?,
+        })
+    }
+}

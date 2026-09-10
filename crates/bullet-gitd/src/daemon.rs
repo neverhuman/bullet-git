@@ -6,12 +6,12 @@ mod codec;
 mod handlers;
 
 use crate::authority_gateway::{AuthorityGateway, MutationPermit, PendingMutation};
-use crate::mutation_ledger::{MutationOperation, MutationOutcome};
+use crate::mutation_ledger::{MutationOperation, MutationOutcome, MutationResult};
 use crate::protocol::{
     self, ApplyParams, ApplyProposalParams, BindProofParams, CleanupParams, CloneParams,
     PrepareParams, PreserveParams, Request, VerifyProofParams,
 };
-use bullet_git_types::{framed_digest, verify_proof_root, Digest, ProofRoot, WireAuthorityToken};
+use bullet_git_types::{framed_digest, verify_proof_root, ProofRoot, WireAuthorityToken};
 use bullet_git_workspace::{
     AgentRepository, CloneRequest, CommitIdentity, ExpectedAuthority, PreservationAuthority,
     PrivateClone, RealRepository, ScopeGrant,
@@ -28,6 +28,69 @@ struct Session {
     repo: RealRepository,
     expected: ExpectedAuthority,
     preservation: PreservationAuthority,
+}
+
+/// Exact daemon-session facts a receipt-gated cleanup binds into its subject.
+///
+/// These live with the session rather than with the gateway because every
+/// field is read from the sealed receipt or from the live session; none of it
+/// is caller-supplied transport data.
+pub(crate) struct ReceiptSubject<'a> {
+    /// Sealed receipt token bytes, which are the authority envelope here.
+    pub(crate) receipt_token: &'a str,
+    /// Lowercase hex digest of the exact sealed receipt token.
+    pub(crate) receipt_digest: &'a str,
+    /// Attempt incarnation verified against the daemon session.
+    pub(crate) attempt_id: &'a str,
+    /// Permanent, never-reused Attempt fence.
+    pub(crate) attempt_fence: u64,
+    /// Workspace nonce verified against the daemon session.
+    pub(crate) workspace_nonce: &'a [u8; 32],
+    /// Daemon-local repository identity for the served workspace.
+    pub(crate) repository_id: &'a str,
+    /// Daemon-local workspace identity for the served workspace.
+    pub(crate) workspace_id: &'a str,
+    /// Exact active workspace generation, numbered from one.
+    pub(crate) workspace_generation: u64,
+}
+
+/// Outcome of one receipt-gated authorization.
+pub(crate) enum ReceiptAuthorization {
+    /// This process durably created the reservation and must settle it.
+    Fresh(Box<MutationPermit>),
+    /// An identical cleanup already settled. Never a second permit.
+    Replay(Box<MutationResult>),
+}
+
+impl Session {
+    /// Daemon-local repository and workspace identity for this session.
+    ///
+    /// Receipt-gated cleanup has no online authority to name the Kernel's
+    /// `rep_`/`wsp_` identities, so the durable subject records the exact
+    /// workspace this daemon serves, derived from its recorded manifest.
+    fn receipt_identity(&self) -> (String, String) {
+        let workspace = self.repo.workspace();
+        let manifest = workspace.manifest();
+        let runtime_dir = workspace.runtime_dir().to_string_lossy();
+        let repository_id = framed_digest(&[
+            b"bullet-gitd.receipt-repository-id.v1",
+            manifest.source_repo.as_bytes(),
+            manifest.mirror_dir.as_bytes(),
+            manifest.base_sha.as_str().as_bytes(),
+        ])
+        .to_hex();
+        let workspace_id = framed_digest(&[
+            b"bullet-gitd.receipt-workspace-id.v1",
+            runtime_dir.as_bytes(),
+            manifest.attempt_id.as_bytes(),
+            manifest.nonce_hex.as_bytes(),
+        ])
+        .to_hex();
+        (
+            format!("rep_{repository_id}"),
+            format!("wsp_{workspace_id}"),
+        )
+    }
 }
 
 /// One daemon instance serves one workspace session.
@@ -135,18 +198,24 @@ impl Daemon {
         Ok(token)
     }
 
-    fn authorize_mutation(
-        &mut self,
-        req: &Request,
-        operation: MutationOperation,
-        token: &WireAuthorityToken,
-    ) -> Result<MutationPermit, MethodError> {
+    /// An indeterminate earlier outcome outranks every later authority.
+    fn require_unfrozen(&self) -> Result<(), MethodError> {
         if self.mutation_frozen {
             return Err((
                 "MUTATION_OUTCOME_UNKNOWN".into(),
                 "daemon mutation is frozen after an indeterminate repository outcome".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn authorize_mutation(
+        &mut self,
+        req: &Request,
+        operation: MutationOperation,
+        token: &WireAuthorityToken,
+    ) -> Result<MutationPermit, MethodError> {
+        self.require_unfrozen()?;
         self.authority
             .authorize(
                 operation,
@@ -170,11 +239,55 @@ impl Daemon {
             .map_err(|error| gateway(&error))
     }
 
+    /// Reserve one cleanup on the authority of an already verified receipt.
+    ///
+    /// A frozen daemon still refuses first: an indeterminate earlier outcome
+    /// outranks any receipt.
+    fn authorize_cleanup_by_receipt(
+        &mut self,
+        req: &Request,
+        receipt: &ReceiptSubject<'_>,
+    ) -> Result<ReceiptAuthorization, MethodError> {
+        self.require_unfrozen()?;
+        self.authority
+            .authorize_by_preservation_receipt(&req.token, &req.params, receipt)
+            .map_err(|error| gateway(&error))
+    }
+
+    fn consume_receipt_permit(
+        &mut self,
+        req: &Request,
+        permit: Box<MutationPermit>,
+    ) -> Result<PendingMutation, MethodError> {
+        self.authority
+            .consume_by_preservation_receipt(*permit, &req.token, &req.params)
+            .map_err(|error| gateway(&error))
+    }
+
     fn settle_result(
         &mut self,
         operation: MutationOperation,
         pending: PendingMutation,
         result: MethodResult,
+    ) -> MethodResult {
+        self.finish_mutation(operation, pending, result, false)
+    }
+
+    /// Settle a receipt-gated cleanup without a Kernel settlement RPC.
+    fn settle_receipt_result(
+        &mut self,
+        pending: PendingMutation,
+        result: MethodResult,
+    ) -> MethodResult {
+        self.finish_mutation(MutationOperation::CleanupWorkspace, pending, result, true)
+    }
+
+    fn finish_mutation(
+        &mut self,
+        operation: MutationOperation,
+        pending: PendingMutation,
+        result: MethodResult,
+        receipt_gated: bool,
     ) -> MethodResult {
         let (outcome, payload) = match &result {
             Ok(value) => (MutationOutcome::Committed, value.clone()),
@@ -204,7 +317,13 @@ impl Daemon {
             &encoded,
         ])
         .to_hex();
-        if let Err(error) = self.authority.settle(pending, outcome, &result_digest) {
+        let settled = if receipt_gated {
+            self.authority
+                .settle_locally(pending, outcome, &result_digest)
+        } else {
+            self.authority.settle(pending, outcome, &result_digest)
+        };
+        if let Err(error) = settled {
             self.mutation_frozen = true;
             return Err(gateway(&error));
         }
@@ -224,3 +343,7 @@ impl Daemon {
 #[cfg(test)]
 #[path = "daemon/tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "daemon/cleanup_receipt_tests.rs"]
+mod cleanup_receipt_tests;

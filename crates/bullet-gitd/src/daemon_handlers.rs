@@ -226,30 +226,115 @@ impl Daemon {
         self.settle_result(MutationOperation::PreserveWorkspace, pending, result)
     }
 
+    /// Delete one preserved workspace on the authority of its sealed receipt.
+    ///
+    /// Cleanup is receipt-gated. The sealed receipt this session issued is the
+    /// whole authority: the writer lease that authorized the attempt is
+    /// terminal by protocol before cleanup runs, so no online lease read-back
+    /// and no Kernel permit are consulted. The receipt is verified before any
+    /// reservation exists, so a forged, mismatched, or foreign receipt is a
+    /// typed refusal that leaves the daemon usable.
     pub(super) fn handle_cleanup(&mut self, req: &Request) -> MethodResult {
         let token = self.verify_token(req)?;
         let params: CleanupParams = parse_params(&req.params)?;
-        let permit = self.authorize_mutation(req, MutationOperation::CleanupWorkspace, &token)?;
-        let pending = self.consume_permit(req, MutationOperation::CleanupWorkspace, permit)?;
+        self.require_unfrozen()?;
         let envelope = protocol::envelope(&req.token);
+        let session = self.session.as_ref().ok_or_else(not_cloned)?;
+        let authorized = session
+            .preservation
+            .authorize_receipt(&session.repo, &envelope, &params.preservation_receipt)
+            .map_err(|error| cap(&error))?;
+        let receipt_digest = authorized.receipt_digest().to_hex();
+        let (repository_id, workspace_id) = session.receipt_identity();
+        let runtime_dir = session.repo.workspace().runtime_dir().to_path_buf();
+        let receipt = ReceiptSubject {
+            receipt_token: &params.preservation_receipt,
+            receipt_digest: &receipt_digest,
+            attempt_id: &token.attempt_id,
+            attempt_fence: token.attempt_fence,
+            workspace_nonce: &token.workspace_nonce,
+            repository_id: &repository_id,
+            workspace_id: &workspace_id,
+            // The durable subject numbers workspace generations from one; the
+            // local generation store numbers the bootstrap generation zero.
+            workspace_generation: session.repo.workspace().generation().saturating_add(1),
+        };
+        let permit = match self.authorize_cleanup_by_receipt(req, &receipt)? {
+            ReceiptAuthorization::Fresh(permit) => permit,
+            ReceiptAuthorization::Replay(settled) => {
+                return self.replay_cleanup(&runtime_dir, &receipt_digest, &settled);
+            }
+        };
+        let pending = self.consume_receipt_permit(req, permit)?;
         let result = (|| {
             let session = self.session.as_mut().ok_or_else(not_cloned)?;
-            let tombstone = session
-                .preservation
-                .cleanup(
-                    &mut session.repo,
-                    &envelope,
-                    &params.preservation_receipt,
-                    &params.deleted_at,
-                )
+            let tombstone = authorized
+                .cleanup(&mut session.repo, &params.deleted_at)
                 .map_err(|error| cap(&error))?;
             self.session = None;
-            Ok(json!({
-                "tombstone": tombstone.display().to_string(),
-                "preservation_receipt_digest": Digest::of(params.preservation_receipt.as_bytes()).to_hex(),
-                "verified": true,
-            }))
+            Ok(cleanup_result(&tombstone, &receipt_digest))
         })();
-        self.settle_result(MutationOperation::CleanupWorkspace, pending, result)
+        self.settle_receipt_result(pending, result)
     }
+
+    /// Return the durable result of an identical settled cleanup.
+    ///
+    /// The success payload is rebuilt from facts that cannot have changed and
+    /// is admitted only when it reproduces the exact durable result digest, so
+    /// a replay returns the recorded result and never deletes a second time.
+    pub(super) fn replay_cleanup(
+        &mut self,
+        runtime_dir: &Path,
+        receipt_digest: &str,
+        settled: &MutationResult,
+    ) -> MethodResult {
+        let mutation_id = settled.subject.mutation_id.as_str();
+        match settled.outcome {
+            MutationOutcome::Committed => {}
+            MutationOutcome::Aborted => {
+                return Err((
+                    "AUTHORITY_REFUSED".into(),
+                    format!("{mutation_id} durably aborted before repository execution"),
+                ));
+            }
+            MutationOutcome::Unknown => {
+                self.mutation_frozen = true;
+                return Err((
+                    "MUTATION_OUTCOME_UNKNOWN".into(),
+                    format!("{mutation_id} has an indeterminate durable cleanup outcome"),
+                ));
+            }
+        }
+        let payload = cleanup_result(&runtime_dir.join("tombstone.json"), receipt_digest);
+        let encoded = serde_json::to_vec(&payload).map_err(|error| {
+            (
+                "MUTATION_OUTCOME_UNKNOWN".to_string(),
+                format!("cannot encode exact mutation result: {error}"),
+            )
+        })?;
+        let result_digest = framed_digest(&[
+            b"bullet-gitd.mutation-result.v1",
+            MutationOperation::CleanupWorkspace.as_str().as_bytes(),
+            b"committed",
+            &encoded,
+        ])
+        .to_hex();
+        if result_digest != settled.result_digest {
+            return Err((
+                "AUTHORITY_REPLAY_CONFLICT".into(),
+                format!("{mutation_id} does not reproduce its durable result digest"),
+            ));
+        }
+        self.session = None;
+        Ok(payload)
+    }
+}
+
+/// The exact three-field cleanup receipt returned to the controller.
+pub(super) fn cleanup_result(tombstone: &Path, receipt_digest: &str) -> Value {
+    json!({
+        "tombstone": tombstone.display().to_string(),
+        "preservation_receipt_digest": receipt_digest,
+        "verified": true,
+    })
 }
