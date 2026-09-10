@@ -158,12 +158,14 @@ impl AgentRepository for RealRepository {
     }
 }
 
+type ProposalAdmission = (Vec<PatchHunk>, Vec<String>, Vec<Option<Vec<u8>>>);
+
 impl RealRepository {
     fn proposal_admission(
         &self,
         auth: &AuthorityEnvelope,
         proposal: &PatchProposal,
-    ) -> Result<(Vec<PatchHunk>, Vec<String>, Vec<Option<Vec<u8>>>), CapabilityError> {
+    ) -> Result<ProposalAdmission, CapabilityError> {
         self.require_healthy()?;
         self.expected.require(auth)?;
         self.guard()?;
