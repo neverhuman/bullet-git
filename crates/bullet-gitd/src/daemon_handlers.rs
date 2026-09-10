@@ -105,6 +105,12 @@ impl Daemon {
             }
             "apply_proposal" => {
                 let params: ApplyProposalParams = parse_params(&req.params)?;
+                self.session
+                    .as_ref()
+                    .ok_or_else(not_cloned)?
+                    .repo
+                    .validate_proposal(&envelope, &params.proposal)
+                    .map_err(|error| cap(&error))?;
                 let permit = self.authorize_mutation(req, MutationOperation::ApplyPatch, &token)?;
                 let pending = self.consume_permit(req, MutationOperation::ApplyPatch, permit)?;
                 let applied = params.proposal.operations.len();

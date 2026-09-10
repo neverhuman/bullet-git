@@ -37,17 +37,17 @@ impl AgentRepository for RealRepository {
         auth: &AuthorityEnvelope,
         proposal: &PatchProposal,
     ) -> Result<Checkpoint, CapabilityError> {
-        self.require_healthy()?;
-        self.expected.require(auth)?;
-        self.guard()?;
-        proposal.validate()?;
-        self.require_proposal_attempt(proposal)?;
-        let active = self.validate_active_checkpoint()?;
-        self.require_proposal_checkpoint(proposal, &active)?;
-        let patches = Self::proposal_patches(proposal);
-        let normalized = self.validate_patches(&patches)?;
-        let preimages = self.require_proposal_preimages(proposal, &normalized)?;
+        let (patches, normalized, preimages) = self.proposal_admission(auth, proposal)?;
         self.publish_proposal_patches(proposal, &patches, &normalized, &preimages)
+    }
+
+    fn validate_proposal(
+        &self,
+        auth: &AuthorityEnvelope,
+        proposal: &PatchProposal,
+    ) -> Result<(), CapabilityError> {
+        self.proposal_admission(auth, proposal)?;
+        Ok(())
     }
 
     fn checkpoint(&mut self, auth: &AuthorityEnvelope) -> Result<Checkpoint, CapabilityError> {
@@ -155,5 +155,27 @@ impl AgentRepository for RealRepository {
         self.lineage.record_change(change.clone())?;
         self.lineage.record_edge(&change.id, edge)?;
         Ok(())
+    }
+}
+
+type ProposalAdmission = (Vec<PatchHunk>, Vec<String>, Vec<Option<Vec<u8>>>);
+
+impl RealRepository {
+    fn proposal_admission(
+        &self,
+        auth: &AuthorityEnvelope,
+        proposal: &PatchProposal,
+    ) -> Result<ProposalAdmission, CapabilityError> {
+        self.require_healthy()?;
+        self.expected.require(auth)?;
+        self.guard()?;
+        proposal.validate()?;
+        self.require_proposal_attempt(proposal)?;
+        let active = self.validate_active_checkpoint()?;
+        self.require_proposal_checkpoint(proposal, &active)?;
+        let patches = Self::proposal_patches(proposal);
+        let normalized = self.validate_patches(&patches)?;
+        let preimages = self.require_proposal_preimages(proposal, &normalized)?;
+        Ok((patches, normalized, preimages))
     }
 }
