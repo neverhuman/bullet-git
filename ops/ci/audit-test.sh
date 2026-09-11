@@ -73,61 +73,50 @@ if [[ "${CI_AUDIT_SCENARIO:-}" == final_fail && "$*" == *'/final/.jankurai/repo-
 fi
 exec "$CI_AUDIT_REAL_CP" "$@"
 COPY
-# This explicit fixture does not perform artifact admission. The real helper's
-# independent ELF tests and later checksum-pinned auditor run establish that seam.
-cat >"$fixture/helper.py" <<'HELPER'
-import json
-import importlib.util
-import os
-from pathlib import Path
-import subprocess
-import sys
-sys.dont_write_bytecode = True
-spec = importlib.util.spec_from_file_location("original_helper", Path(__file__).with_name("jankurai-tool-source.py"))
-original = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(original)
-# The report consumer reuses actual nofollow reader primitives. Only the
-# explicit fixture's command execution branch below replaces artifact admission.
-globals().update({name: value for name, value in vars(original).items() if not name.startswith("__")})
-if __name__ == "__main__":
-    candidate, record = sys.argv[2], sys.argv[4]
-    assert sys.argv[1] == "--candidate" and sys.argv[3] == "--record" and sys.argv[5] == "--"
-    command = sys.argv[6:]
-    assert Path(candidate).is_absolute() and Path(record).is_absolute()
-    try:
-        with open(record, "x") as output:
-            json.dump({"fixture": True, "artifact_admission": False, "candidate": candidate, "argv": command}, output)
-    except FileExistsError:
-        sys.exit(75)
-    if command == ["--version"]:
-        with open(Path(os.environ["CI_AUDIT_CASE"]) / "version-starts", "a") as marker:
-            marker.write("started\n")
-        print("jankurai 1.6.11")
-        sys.exit(0)
-    sys.exit(subprocess.call([candidate, *command]))
+# Compile the production Rust validator through the unchanged canonical bootstrap.
+# Only the private fixture launcher below substitutes native admission/execution.
+# shellcheck source=ops/ci/jankurai-bootstrap.sh
+source "$REPO_ROOT/ops/ci/jankurai-bootstrap.sh"
+checker_run="$(jankurai_bootstrap_check_prepare)"
+CI_AUDIT_RUST_VALIDATOR="$(jankurai_bootstrap_resolve "$checker_run" check)"
+export CI_AUDIT_RUST_VALIDATOR
+cat >"$fixture/helper.sh" <<'HELPER'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == report ]]; then exec "$CI_AUDIT_RUST_VALIDATOR" "$@"; fi
+[[ "$1" == --candidate && "$3" == --record && "$5" == -- ]]
+candidate=$2 record=$4
+shift 5
+[[ "$candidate" == /* && "$record" == /* ]]
+(set -o noclobber; jq -n --arg candidate "$candidate" --args \
+  '{fixture:true,artifact_admission:false,candidate:$candidate,argv:$ARGS.positional}' -- "$@" >"$record") || exit 75
+if [[ $# -eq 1 && "$1" == --version ]]; then
+  printf 'started\n' >>"$CI_AUDIT_CASE/version-starts"
+  printf 'jankurai 1.6.11\n'
+  exit 0
+fi
+exec "$candidate" "$@"
 HELPER
-chmod +x "$fixture/bin/jankurai" "$fixture/bin/cp"
+chmod +x "$fixture/bin/jankurai" "$fixture/bin/cp" "$fixture/helper.sh"
 export CI_AUDIT_CASE CI_AUDIT_SCENARIO CI_AUDIT_JSON CI_AUDIT_NATIVE_STATUS
-valid="$(python3 -I -S - <<'POLICY'
-import hashlib, json, pathlib, tomllib
-raw = pathlib.Path('agent/audit-policy.toml').read_bytes()
-policy = tomllib.loads(raw.decode())
-print(json.dumps(dict(policy={**{k:policy[k] for k in ('minimum_score','fail_on','advisory_on')},'mode':'standard'},
-    score=90, decision=dict(passed=True,status='pass',minimum_score=policy['minimum_score'],hard_findings=0),
-    findings=[],caps_applied=[],policy_fingerprint='sha256:'+hashlib.sha256(raw).hexdigest(),
-    report_fingerprint='fixture-report',input_fingerprint='fixture-input',schema_version='fixture',standard_version='fixture'),separators=(',',':')))
-POLICY
-)"
+# These fixture policy bytes are exact synthetic input, checked by the real Rust
+# report reader after a real fixture Git commit. They do not assert native policy.
+fixture_policy=$'minimum_score = 85\nfail_on = ["critical", "high"]\nadvisory_on = ["medium", "low"]\n'
+policy_hash="$(printf '%s' "$fixture_policy" | sha256sum | cut -d ' ' -f 1)"
+valid="$(jq -cn --arg hash "$policy_hash" '{policy:{minimum_score:85,fail_on:["critical","high"],advisory_on:["medium","low"],mode:"standard"},score:90,decision:{passed:true,status:"pass",minimum_score:85,hard_findings:0},findings:[],caps_applied:[],policy_fingerprint:("sha256:"+$hash),report_fingerprint:"fixture-report",input_fingerprint:"fixture-input",schema_version:"fixture",standard_version:"fixture"}')"
 case_count=0
 new_case() {
   CI_AUDIT_CASE="$fixture/$1"
   mkdir -p "$CI_AUDIT_CASE/repo/ops/ci" "$CI_AUDIT_CASE/repo/scripts" "$CI_AUDIT_CASE/repo/.jankurai" "$CI_AUDIT_CASE/repo/agent" \
     "$CI_AUDIT_CASE/repo/.ci-artifacts/observations" "$CI_AUDIT_CASE/repo/target/jankurai/update"
   "$CI_AUDIT_REAL_CP" ops/ci/audit.sh ops/ci/lib.sh "$CI_AUDIT_CASE/repo/ops/ci/"
-  "$CI_AUDIT_REAL_CP" "$fixture/helper.py" "$CI_AUDIT_CASE/repo/ops/ci/jankurai-tool.py"
-  "$CI_AUDIT_REAL_CP" ops/ci/jankurai-tool.py "$CI_AUDIT_CASE/repo/ops/ci/jankurai-tool-source.py"
-  "$CI_AUDIT_REAL_CP" ops/ci/audit-observation.py "$CI_AUDIT_CASE/repo/ops/ci/"
-  "$CI_AUDIT_REAL_CP" agent/audit-policy.toml "$CI_AUDIT_CASE/repo/agent/"
+  "$CI_AUDIT_REAL_CP" "$fixture/helper.sh" "$CI_AUDIT_CASE/repo/ops/ci/fixture-helper.sh"
+  # Explicit private resolver fixture: production bootstrap is exercised above.
+  cat >"$CI_AUDIT_CASE/repo/ops/ci/jankurai-bootstrap.sh" <<'RESOLVER'
+jankurai_bootstrap_prepare() { printf 'fixture bootstrap started\n' >"$1/fixture-bootstrap-started"; }
+jankurai_bootstrap_resolve() { printf '%s\n' "$CI_AUDIT_CASE/repo/ops/ci/fixture-helper.sh"; }
+RESOLVER
+  printf '%s' "$fixture_policy" >"$CI_AUDIT_CASE/repo/agent/audit-policy.toml"
   "$CI_AUDIT_REAL_CP" scripts/ci-doctor.sh "$CI_AUDIT_CASE/repo/scripts/"
   git -C "$CI_AUDIT_CASE/repo" init --quiet --template=
   git -C "$CI_AUDIT_CASE/repo" add agent/audit-policy.toml
@@ -138,6 +127,7 @@ new_case() {
 run_case() {
   local expected="$1" starts="$2" status=0
   shift 2
+  if [[ $# -eq 0 ]]; then fresh_binding "$$"; set -- --audit-run "$bound"; fi
   PATH="$fixture/bin:$PATH" JANKURAI_NO_UPDATE_CHECK=0 \
     bash "$CI_AUDIT_CASE/repo/ops/ci/audit.sh" "$@" \
     >"$CI_AUDIT_CASE/stdout" 2>"$CI_AUDIT_CASE/stderr" || status=$?
@@ -167,6 +157,13 @@ run_path() {
   local -a runs=("$CI_AUDIT_CASE/repo/target/jankurai/audit-runs"/run.*)
   [[ ${#runs[@]} -eq 1 && -d "${runs[0]}" ]]
   printf '%s\n' "${runs[0]}"
+}
+fresh_binding() {
+  mkdir -p "$CI_AUDIT_CASE/repo/target/jankurai/audit-runs"
+  bound="$(mktemp -d "$CI_AUDIT_CASE/repo/target/jankurai/audit-runs/run.XXXXXXXX")"
+  (umask 077; jq -n --arg id "${bound##*/}" --arg repository "$CI_AUDIT_CASE/repo" --argjson pid "$1" \
+    '{schema:"bullet.audit-invocation.v1",id:$id,repository:$repository,origin:"dispatcher",parent_pid:$pid}' \
+    >"$bound/invocation.json")
 }
 new_case success_preserves_previous
 for file in .jankurai/repo-score.json .jankurai/repo-score.md .jankurai/repair-queue.jsonl \
@@ -266,14 +263,8 @@ printf 'foreign\n' >"$CI_AUDIT_CASE/foreign"
 run_case 1 0
 [[ "$(<"$CI_AUDIT_CASE/foreign")" == foreign ]]
 # Parent identity and one-use relationships use actual doctor/audit scripts;
-# the native helper is explicitly the component fixture above.
-fresh_binding() {
-  mkdir -p "$CI_AUDIT_CASE/repo/target/jankurai/audit-runs"
-  bound="$(mktemp -d "$CI_AUDIT_CASE/repo/target/jankurai/audit-runs/run.XXXXXXXX")"
-  (umask 077; jq -n --arg id "${bound##*/}" --arg repository "$CI_AUDIT_CASE/repo" --argjson pid "$1" \
-    '{schema:"bullet.audit-invocation.v1",id:$id,repository:$repository,origin:"dispatcher",parent_pid:$pid}' \
-    >"$bound/invocation.json")
-}
+# the native launcher/resolver is explicitly the component fixture above.
+
 new_case doctor_bound
 fresh_binding "$$"
 PATH="$fixture/bin:$PATH" bash "$CI_AUDIT_CASE/repo/scripts/ci-doctor.sh" audit --audit-run "$bound" \
@@ -310,8 +301,11 @@ case_count=$((case_count + 1))
 new_case actual_score_alias_refuses_unadmitted_candidate
 "$CI_AUDIT_REAL_CP" Justfile "$CI_AUDIT_CASE/repo/"
 "$CI_AUDIT_REAL_CP" scripts/ci-local.sh scripts/ci-observation.sh "$CI_AUDIT_CASE/repo/scripts/"
-# This case uses the unchanged production admission helper, not helper.py.
-"$CI_AUDIT_REAL_CP" ops/ci/jankurai-tool.py "$CI_AUDIT_CASE/repo/ops/ci/"
+# The exact freshly emitted Rust executable handles this candidate refusal.
+cat >"$CI_AUDIT_CASE/repo/ops/ci/jankurai-bootstrap.sh" <<'RESOLVER'
+jankurai_bootstrap_prepare() { printf 'fixture bootstrap started\n' >"$1/fixture-bootstrap-started"; }
+jankurai_bootstrap_resolve() { printf '%s\n' "$CI_AUDIT_RUST_VALIDATOR"; }
+RESOLVER
 for name in repo-score.json repo-score.md repair-queue.jsonl; do
   printf 'historical %s\n' "$name" >"$CI_AUDIT_CASE/repo/.jankurai/$name"
 done
@@ -326,7 +320,7 @@ for name in repo-score.json repo-score.md repair-queue.jsonl; do
   [[ "$(<"$CI_AUDIT_CASE/repo/.jankurai/$name")" == "historical $name" ]]
 done
 retained="$(run_path)"
-jq -e '.primary_status==75 and .outcome=="FAIL" and .tools.doctor.native_returncode==null' \
+jq -e '.primary_status==75 and .outcome=="FAIL" and (.integrity_issues|length)>0' \
   "$retained/observation.json" >/dev/null
 [[ ! -e "$CI_AUDIT_CASE/repo/.git/bullet-ci.lock.d" ]]
 case_count=$((case_count + 1))

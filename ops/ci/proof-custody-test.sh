@@ -80,6 +80,14 @@ set -eu
 printf 'started\n' >"$2/stub-audit-started"
 exit "${CI_FIXTURE_STATUS:-0}"
 FIXTURE
+# This dispatcher fixture records a real function invocation but never compiles.
+cat >"$fixture/ops/ci/jankurai-bootstrap.sh" <<'FIXTURE'
+jankurai_bootstrap_prepare() {
+  [[ $# -eq 1 && -f "$1/invocation.json" ]] || return 96
+  printf 'started\n' >"$1/stub-bootstrap-started"
+  return "${CI_FIXTURE_BOOTSTRAP_STATUS:-0}"
+}
+FIXTURE
 chmod +x "$fixture/scripts/"*.sh "$fixture/ops/ci/fast.sh" "$fixture/ops/ci/required.sh"
 
 wait_for() {
@@ -205,6 +213,7 @@ for scenario in '0:0:0:0' '0:19:41:19' '29:19:41:29'; do
   run="$(<"$fixture/doctor-run")"
   [[ "$run" != "$previous_run" && "$run" == "$(<"$fixture/observation-run")" ]]
   [[ "$(<"$run/previous-observation.json")" == "old audit $scenario" ]]
+  [[ -f "$run/stub-bootstrap-started" && "$(<"$run/bootstrap.exit")" -eq 0 ]]
   [[ "$(<"$run/doctor.exit")" -eq "$doctor" && "$(<"$run/observation.exit")" -eq "$observer" ]]
   jq -e --arg id "${run##*/}" --arg root "$fixture" \
     '.schema=="bullet.audit-invocation.v1" and .id==$id and .repository==$root and .origin=="dispatcher"' \
@@ -216,6 +225,26 @@ for scenario in '0:0:0:0' '0:19:41:19' '29:19:41:29'; do
   fi
   previous_run="$run"
 done
+# A real dispatcher bootstrap function failure must not launch doctor or audit,
+# and must retain its original status without requiring the unbuilt observer.
+children_before="$(line_count "$fixture/children")"
+observations_before="$(line_count "$fixture/observation-calls")"
+status=0
+CI_FIXTURE_BOOTSTRAP_STATUS=23 bash "$fixture/scripts/ci-local.sh" audit \
+  >"$fixture/bootstrap-failed.stdout" 2>"$fixture/bootstrap-failed.stderr" || status=$?
+printf '%s\n' "$status" >"$fixture/bootstrap-failed.exit"
+[[ "$status" -eq 23 && ! -e "$lock" &&
+  "$(line_count "$fixture/children")" -eq "$children_before" &&
+  "$(line_count "$fixture/observation-calls")" -eq "$observations_before" ]]
+failed_bootstraps=0
+for candidate in "$fixture/target/jankurai/audit-runs"/run.*; do
+  if [[ -f "$candidate/bootstrap.exit" && "$(<"$candidate/bootstrap.exit")" == 23 ]]; then
+    failed_bootstraps=$((failed_bootstraps + 1))
+    [[ -f "$candidate/stub-bootstrap-started" && ! -e "$candidate/doctor.exit" &&
+      ! -e "$candidate/stub-audit-started" && ! -e "$candidate/observation.exit" ]]
+  fi
+done
+[[ "$failed_bootstraps" -eq 1 ]]
 log "actual dispatcher fresh audit identities, doctor refusal and primary failure preservation passed"
 
 assert_alias_custody gates

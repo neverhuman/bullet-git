@@ -16,7 +16,13 @@ if [[ "$lane" == audit ]]; then
   }
   # Audit records are local point-in-time diagnostics. Their absolute run/tool
   # subjects are not portable aggregate or installed-distribution evidence.
-  exec python3 -I -S "$REPO_ROOT/ops/ci/audit-observation.py" check "$expected_commit"
+  # A historical receipt cannot choose the executable that checks itself.
+  # shellcheck source=ops/ci/jankurai-bootstrap.sh
+  source "$REPO_ROOT/ops/ci/jankurai-bootstrap.sh"
+  checker_run="$(jankurai_bootstrap_check_prepare)" || exit "$?"
+  checker_binary="$(jankurai_bootstrap_resolve "$checker_run" check)" || exit 75
+  runtime_parent="$(mktemp -d "${TMPDIR:-/tmp}/bullet-audit-check.XXXXXXXX")" || exit 1
+  exec "$checker_binary" check --root "$REPO_ROOT" --runtime "$runtime_parent/check" --commit "$expected_commit"
 fi
 case "$lane" in
   source-scan|fast|lint|contract|security|docs|history|links|advisory|coverage|platform) ;;
