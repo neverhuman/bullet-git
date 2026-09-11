@@ -1,12 +1,20 @@
 //! Fixed artifact/argv admission shared by this local CI binary and its tests.
 #[path = "admission.rs"]
 mod admission;
+#[path = "artifacts.rs"]
+mod artifacts;
 #[path = "execution.rs"]
 mod execution;
+#[path = "observation/mod.rs"]
+mod observation;
 #[path = "paths.rs"]
 mod paths;
 #[path = "record.rs"]
 mod record;
+#[path = "report.rs"]
+mod report;
+#[path = "report_policy/mod.rs"]
+mod report_policy;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
@@ -48,8 +56,36 @@ fn io(error: impl std::fmt::Display) -> String {
 
 pub(super) fn entry(args: Vec<OsString>) -> i32 {
     if args == [OsString::from("--help")] {
-        println!("bullet-ci-jankurai --candidate ABSOLUTE --record ABSOLUTE -- COMMAND\nLocal CI artifact admission only; no release authority.");
+        println!("bullet-ci-jankurai --candidate ABSOLUTE --record ABSOLUTE -- COMMAND\nbullet-ci-jankurai report --root ABS --runtime NEW_ABS --report ABS [--baseline ABS]\nbullet-ci-jankurai capture --root ABS --runtime NEW_ABS --run ABS --status N\nbullet-ci-jankurai check --root ABS --runtime NEW_ABS --commit OID\nLocal CI artifact admission and diagnostics only; no release authority.");
         return 0;
+    }
+    if let Some(command) = args
+        .first()
+        .and_then(|arg| arg.to_str())
+        .filter(|command| matches!(*command, "report" | "capture" | "check"))
+    {
+        let result = args[1..]
+            .iter()
+            .map(|arg| {
+                arg.to_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "NON_UTF8_ARGUMENT".to_owned())
+            })
+            .collect::<Result<Vec<_>>>()
+            .and_then(|args| {
+                if command == "report" {
+                    report::entry(&args).map(|()| 0)
+                } else {
+                    observation::entry(command, &args)
+                }
+            });
+        return match result {
+            Ok(status) => i32::from(status),
+            Err(error) => {
+                eprintln!("audit-observation: {error}");
+                75
+            }
+        };
     }
     match parse(args) {
         Ok(request) => invoke(&request, PIN, std::env::vars_os().collect()),
