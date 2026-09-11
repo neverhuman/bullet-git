@@ -11,6 +11,15 @@ shift 2 || true
   exit 2
 }
 
+# Local audit has its own exact run/tool/report consumer. Do not execute unrelated
+# optional version probes or reinterpret --audit-run as a command receipt.
+if [[ "$lane" == audit ]]; then
+  [[ "$#" -eq 4 && "$1" == --audit-run \
+    && "$3" == 'bash scripts/ci-doctor.sh audit' \
+    && "$4" == 'bash ops/ci/audit.sh' ]] || exit 2
+  exec python3 -I -S "$repo_root/ops/ci/audit-observation.py" capture "$2" "$status"
+fi
+
 outcome=FAIL
 [[ "$status" -eq 0 ]] && outcome=PASS
 commit_oid="$(git rev-parse HEAD)"

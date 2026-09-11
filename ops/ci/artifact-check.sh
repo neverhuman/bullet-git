@@ -8,6 +8,16 @@ lane="${1:-}"
 expected_commit="${2:-}"
 artifact_root="${3:-.ci-artifacts}"
 mode="${4:-atomic}"
+if [[ "$lane" == audit ]]; then
+  [[ "$expected_commit" =~ ^[0-9a-f]{40}$ && "$mode" == atomic \
+    && ( "$artifact_root" == .ci-artifacts || "$artifact_root" == "$REPO_ROOT/.ci-artifacts" ) ]] || {
+    echo '[ci] AUDIT_LOCAL_ARTIFACT_SUBJECT_REQUIRED: exact local root, commit and atomic mode' >&2
+    exit 1
+  }
+  # Audit records are local point-in-time diagnostics. Their absolute run/tool
+  # subjects are not portable aggregate or installed-distribution evidence.
+  exec python3 -I -S "$REPO_ROOT/ops/ci/audit-observation.py" check "$expected_commit"
+fi
 case "$lane" in
   source-scan|fast|lint|contract|security|docs|history|links|advisory|coverage|platform) ;;
   *) echo "usage: $0 <lane> <commit> [artifact-root [atomic|merged]]" >&2; exit 2 ;;
