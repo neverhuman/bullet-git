@@ -45,12 +45,12 @@ pub(super) fn allowed() -> BTreeSet<String> {
     .chain(PRODUCER)
     .map(str::to_owned)
     .collect();
-    for stage in ["doctor", "lane", "audit", "ratchet"] {
+    for stage in ["bootstrap", "doctor", "lane", "audit", "ratchet"] {
         for suffix in ["stdout", "stderr", "exit"] {
             result.insert(format!("{stage}.{suffix}"));
         }
     }
-    for stage in ["doctor", "lane"] {
+    for stage in ["bootstrap", "doctor", "lane"] {
         result.insert(format!("{stage}.argv"));
     }
     for stage in ["doctor", "audit", "ratchet"] {
@@ -60,7 +60,7 @@ pub(super) fn allowed() -> BTreeSet<String> {
         result.insert(format!("doctor.tool.jsonl.{suffix}"));
     }
     for stage in ["audit", "ratchet"] {
-        for suffix in ["stdout", "stderr", "exit"] {
+        for suffix in ["argv", "stdout", "stderr", "exit"] {
             result.insert(format!("{stage}.validation.{suffix}"));
         }
     }

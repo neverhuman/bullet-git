@@ -1,4 +1,6 @@
 //! Real filesystem/Git fixtures; native event rows are explicitly synthetic.
+#[path = "bootstrap_fixture.rs"]
+pub(super) mod build;
 use super::{common::*, *};
 use base64::Engine;
 use bullet_git_workspace::{FileProtocol, SafeGit};
@@ -43,6 +45,7 @@ impl Fixture {
             b"target/\n.ci-artifacts/\n.jankurai/\n",
         )
         .unwrap();
+        build::sources(&root);
         git.run(
             Some(Path::new(&root)),
             FileProtocol::Never,
@@ -93,6 +96,7 @@ impl Fixture {
             serial: Cell::new(0),
         };
         result.put("invocation.json",&json_bytes(&json!({"schema":"bullet.audit-invocation.v1","id":"run.ABCD1234","repository":result.root,"origin":"dispatcher","parent_pid":std::process::id()})));
+        build::attach(&result);
         result.stage(
             "doctor",
             &[
@@ -126,9 +130,19 @@ impl Fixture {
         ] {
             result.put(&format!("audit.{suffix}"), bytes);
         }
+        build::validation(&result, "audit");
         result.snapshot("before", &BTreeMap::new());
         result.refresh();
         result
+    }
+    pub(super) fn build_directory(&self) -> String {
+        build::directory(self)
+    }
+    pub(super) fn refresh_build_checksums(&self) {
+        build::refresh_checksums(self);
+    }
+    pub(super) fn validation_command(&self, name: &str) {
+        build::validation(self, name);
     }
     pub(super) fn put(&self, name: &str, bytes: &[u8]) {
         write(&format!("{}/{name}", self.run), bytes);
