@@ -15,10 +15,10 @@ mod tests;
 mod tool_record;
 mod validate;
 
-use super::{Result, artifacts, io, paths, report::Repository, report_policy};
+use super::{artifacts, io, paths, report::Repository, report_policy, Result};
 use common::*;
 use inventory::Inventory;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;

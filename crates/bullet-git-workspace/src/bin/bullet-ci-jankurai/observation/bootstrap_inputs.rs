@@ -1,5 +1,5 @@
 //! Exact local build input readback; this does not replace the source monitor.
-use super::super::{Result, artifacts, io, paths};
+use super::super::{artifacts, io, paths, Result};
 use super::common::require;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

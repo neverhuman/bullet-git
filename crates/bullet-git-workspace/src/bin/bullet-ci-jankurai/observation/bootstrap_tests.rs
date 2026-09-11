@@ -18,24 +18,18 @@ fn missing_build_stream_keeps_other_originals_and_failed_primary() {
     let saved = f.saved();
     assert_eq!(saved["primary_status"], 23);
     assert_eq!(saved["outcome"], "FAIL");
-    assert!(
-        saved["integrity_issues"]
-            .to_string()
-            .contains("BOOTSTRAP_ARTIFACT_UNREADABLE:cargo.stdout")
-    );
-    assert!(
-        saved["artifact_hashes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["path"] == "build/cargo.stderr")
-    );
-    assert!(
-        saved["omitted_artifacts"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("build/cargo.stdout"))
-    );
+    assert!(saved["integrity_issues"]
+        .to_string()
+        .contains("BOOTSTRAP_ARTIFACT_UNREADABLE:cargo.stdout"));
+    assert!(saved["artifact_hashes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "build/cargo.stderr"));
+    assert!(saved["omitted_artifacts"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("build/cargo.stdout")));
 }
 
 #[test]
