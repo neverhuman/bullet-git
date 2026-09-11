@@ -49,6 +49,13 @@ if [[ "$lane" == audit-components ]]; then
     echo 'ci-doctor: AUDIT_COMPONENT_PROFILE_UNAVAILABLE (local Linux x86_64 required)' >&2
     exit 75
   }
+  # The component matrix invokes the real score recipe. Presence alone admits
+  # older just binaries that cannot parse this repository's recipe attributes.
+  component_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  just --justfile "$component_root/Justfile" --summary >/dev/null || {
+    echo 'ci-doctor: AUDIT_COMPONENT_JUSTFILE_UNSUPPORTED; select a compatible just binary' >&2
+    exit 1
+  }
 fi
 
 if [[ "$lane" == toolchain-msrv ]]; then
