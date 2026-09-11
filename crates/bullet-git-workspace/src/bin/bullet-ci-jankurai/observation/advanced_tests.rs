@@ -36,6 +36,7 @@ fn ratchet_fixture() -> Fixture {
     for suffix in ["exit", "validation.exit"] {
         f.put(&format!("ratchet.{suffix}"), b"0\n");
     }
+    f.validation_command("ratchet");
     f
 }
 
@@ -71,6 +72,10 @@ fn doctor_refusal_preserves_prelaunch_failed_diagnostic() {
             "doctor.argv",
             "doctor.stdout",
             "doctor.stderr",
+            "bootstrap.argv",
+            "bootstrap.stdout",
+            "bootstrap.stderr",
+            "bootstrap.exit",
         ]
         .contains(&name.to_str().unwrap())
         {
@@ -111,9 +116,11 @@ fn process_failure_and_refusal_native_status_must_agree() {
     f.save_rows("doctor", &rows);
     f.put("doctor.exit", b"75\n");
     assert_eq!(f.capture(75).unwrap(), 75);
-    assert!(f.saved()["integrity_issues"]
-        .to_string()
-        .contains("REFUSAL_STATUS_CONTRADICTION"));
+    assert!(
+        f.saved()["integrity_issues"]
+            .to_string()
+            .contains("REFUSAL_STATUS_CONTRADICTION")
+    );
 }
 
 #[test]
@@ -135,22 +142,26 @@ fn cli_options_and_foreign_root_refuse_before_capture() {
             ],
         ),
     ] {
-        assert!(entry(
-            command,
-            &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
-        )
-        .is_err());
+        assert!(
+            entry(
+                command,
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            )
+            .is_err()
+        );
     }
     let f = Fixture::new();
     assert_eq!(f.capture(0).unwrap(), 0);
     let foreign = f.directory.path().join("foreign");
     fs::create_dir(&foreign).unwrap();
-    assert!(check(
-        foreign.to_str().unwrap(),
-        &f.commit,
-        f.directory.path().join("foreign-runtime").to_str().unwrap()
-    )
-    .is_err());
+    assert!(
+        check(
+            foreign.to_str().unwrap(),
+            &f.commit,
+            f.directory.path().join("foreign-runtime").to_str().unwrap()
+        )
+        .is_err()
+    );
 }
 
 #[test]
