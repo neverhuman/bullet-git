@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Jankurai consumes native policy; AUDIT_FLOOR is an additional upward-only ratchet.
 set -euo pipefail
+if [[ $# -eq 0 ]]; then
+  exec bash "$(dirname "${BASH_SOURCE[0]}")/../../scripts/ci-local.sh" audit
+fi
 # shellcheck source=ops/ci/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
 AUDIT_FLOOR=65
 export JANKURAI_NO_UPDATE_CHECK=1
-for tool in jankurai python3 jq cp mkdir mktemp rm cat find id; do require_tool "$tool" || exit 1; done
-python3 -I -S -c 'import tomllib' || {
-  echo '[ci] AUDIT_TOML_PARSER_UNAVAILABLE before native launch' >&2
-  exit 75
-}
+for tool in jankurai jq cp mkdir mktemp rm cat find id; do require_tool "$tool" || exit 1; done
+# shellcheck source=ops/ci/jankurai-bootstrap.sh
+source "$REPO_ROOT/ops/ci/jankurai-bootstrap.sh"
 umask 077
 # Fixed output ancestors must be ordinary directories. This is a local lane,
 # not an adversarial filesystem custody monitor.
@@ -22,12 +23,7 @@ for directory in target target/jankurai target/jankurai/audit-runs \
   }
 done
 mkdir -p target/jankurai/audit-runs .jankurai
-if [[ $# -eq 0 ]]; then
-  run_dir="$(mktemp -d "$REPO_ROOT/target/jankurai/audit-runs/run.XXXXXXXX")"
-  jq -n --arg id "${run_dir##*/}" --arg repository "$REPO_ROOT" --argjson pid "$$" \
-    '{schema:"bullet.audit-invocation.v1",id:$id,repository:$repository,
-      origin:"standalone",parent_pid:$pid}' >"$run_dir/invocation.json"
-elif [[ $# -eq 2 && "$1" == --audit-run ]]; then
+if [[ $# -eq 2 && "$1" == --audit-run ]]; then
   run_dir="$2"
   expected="$REPO_ROOT/target/jankurai/audit-runs/"
   suffix="${run_dir#"$expected"}"
@@ -45,6 +41,7 @@ else
   echo 'usage: audit.sh [--audit-run <dispatcher-owned-run>]' >&2
   exit 2
 fi
+audit_binary="$(jankurai_bootstrap_resolve "$run_dir")" || exit 75
 # A completed/failed/ambiguous attempt never reuses the same invocation directory.
 (set -o noclobber; printf 'pid=%s\n' "$$" >"$run_dir/audit.started") || exit 75
 candidate="$(type -P jankurai)"
@@ -121,7 +118,7 @@ run_audit() {
   local name="$1" json_path="$2" md_path="$3" native_status=0 validation_status=0
   shift 3
   stage="$name"
-  python3 -I -S "$REPO_ROOT/ops/ci/jankurai-tool.py" --candidate "$candidate" \
+  "$audit_binary" --candidate "$candidate" \
     --record "$run_dir/$name.tool.jsonl" -- audit . --full --no-score-history "$@" \
     --json "$json_path" --md "$md_path" \
     >"$run_dir/$name.stdout" 2>"$run_dir/$name.stderr" || native_status=$?
@@ -145,10 +142,18 @@ run_audit() {
   ' "$json_path" >"$run_dir/$name.validation.stdout" \
     2>"$run_dir/$name.validation.stderr" || validation_status=$?
   if [[ "$validation_status" -eq 0 ]]; then
-    local -a policy_args=(report "$json_path")
-    [[ "$name" != ratchet ]] || policy_args+=(target/jankurai/accepted-baseline.json)
-    python3 -I -S "$REPO_ROOT/ops/ci/audit-observation.py" "${policy_args[@]}" \
-      >>"$run_dir/$name.validation.stdout" 2>>"$run_dir/$name.validation.stderr" || validation_status=$?
+    local runtime_parent absolute_report="$json_path"
+    runtime_parent="$(mktemp -d "${TMPDIR:-/tmp}/bullet-audit-report.XXXXXXXX")" || validation_status=$?
+    [[ "$absolute_report" == /* ]] || absolute_report="$REPO_ROOT/$absolute_report"
+    local -a policy_args=(report --root "$REPO_ROOT" --runtime "$runtime_parent/validation" --report "$absolute_report")
+    [[ "$name" != ratchet ]] || policy_args+=(--baseline "$REPO_ROOT/target/jankurai/accepted-baseline.json")
+    if [[ "$validation_status" -eq 0 ]]; then
+      printf '%s\0' "$audit_binary" "${policy_args[@]}" >"$run_dir/$name.validation.argv" || validation_status=1
+    fi
+    if [[ "$validation_status" -eq 0 ]]; then
+      "$audit_binary" "${policy_args[@]}" \
+        >>"$run_dir/$name.validation.stdout" 2>>"$run_dir/$name.validation.stderr" || validation_status=$?
+    fi
   fi
   printf '%s\n' "$validation_status" >"$run_dir/$name.validation.exit" || retention_status=1
   [[ "$validation_status" -eq 0 && "$retention_status" -eq 0 ]]

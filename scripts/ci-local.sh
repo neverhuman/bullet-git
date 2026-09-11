@@ -147,8 +147,16 @@ run_audit_stage() {
   local name="$1" result=0 retained=0
   shift
   (umask 077; set -o noclobber; printf '%s\0' "$@" >"$audit_run/$name.argv") || return 1
-  (umask 077; set -o noclobber
-    exec "$@" >"$audit_run/$name.stdout" 2>"$audit_run/$name.stderr") || result=$?
+  if [[ "$name" == bootstrap ]]; then
+    # The build is an explicit shell-function stage, not a claimed external argv.
+    # Bash preserves the dispatcher's $$ in this subshell for invocation binding.
+    [[ $# -eq 2 && "$1" == jankurai_bootstrap_prepare ]] || return 2
+    (umask 077; set -o noclobber
+      "$@" >"$audit_run/$name.stdout" 2>"$audit_run/$name.stderr") || result=$?
+  else
+    (umask 077; set -o noclobber
+      exec "$@" >"$audit_run/$name.stdout" 2>"$audit_run/$name.stderr") || result=$?
+  fi
   (umask 077; set -o noclobber
     printf '%s\n' "$result" >"$audit_run/$name.exit") || retained=1
   cat "$audit_run/$name.stdout" || retained=1
@@ -165,6 +173,16 @@ run_observed() {
     prepare_audit_run || status=$?
     if [[ "$status" -ne 0 ]]; then
       release_proof_lock || return $?
+      return "$status"
+    fi
+    # shellcheck source=ops/ci/jankurai-bootstrap.sh
+    source ops/ci/jankurai-bootstrap.sh
+    run_audit_stage bootstrap jankurai_bootstrap_prepare "$audit_run" || status=$?
+    if [[ "$status" -ne 0 ]]; then
+      local bootstrap_release=0
+      release_proof_lock || bootstrap_release=$?
+      printf 'ci-local: bootstrap primary status=%s release status=%s; native audit not launched\n' \
+        "$status" "$bootstrap_release" >&2
       return "$status"
     fi
   fi

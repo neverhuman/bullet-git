@@ -18,8 +18,8 @@ case "$lane" in
   security) tools=(bash cargo cargo-deny date dirname git gitleaks jq rustc) ;;
   docs) tools=(bash cargo dirname git jq readlink rustc) ;;
   required) tools=(actionlint bash cargo cargo-clippy cargo-deny cargo-nextest cmp comm cp date dirname git gitleaks jq mktemp python3 readlink rustc rustfmt shellcheck sort zizmor) ;;
-  audit) tools=(bash cat cp dirname git jankurai jq mkdir mktemp mv python3 rm) ;;
-  audit-components) tools=(bash cat chmod cp dirname git jq just ln mkdir mktemp python3 rm) ;;
+  audit) tools=(bash cargo cat cmp cp cut dirname env git jankurai jq mkdir mktemp mv realpath rm rustc sha256sum sort stat sync) ;;
+  audit-components) tools=(bash cargo cargo-nextest cat chmod cmp cp cut dirname env git jq just ln mkdir mktemp mv realpath rm rustc sha256sum sort stat sync uname) ;;
   nightly) tools=(bash dirname git jq) ;;
   history) tools=(bash dirname git gitleaks jq) ;;
   links) tools=(bash curl dirname git jq sort) ;;
@@ -27,7 +27,7 @@ case "$lane" in
   coverage) tools=(bash cargo cargo-llvm-cov cargo-nextest dirname git jq rustc) ;;
   platform) tools=(awk bash cargo dirname git jq rustc) ;;
   toolchain-msrv) tools=(b3sum bash cargo dirname git jq rustc rustup) ;;
-  all) tools=(actionlint bash cargo cargo-clippy cargo-deny cargo-nextest cmp comm cp date dirname git gitleaks jankurai jq mkdir mktemp python3 readlink rustc rustfmt shellcheck sort zizmor) ;;
+  all) tools=(actionlint bash cargo cargo-clippy cargo-deny cargo-nextest cmp comm cp date dirname git gitleaks jq mkdir mktemp python3 readlink rustc rustfmt shellcheck sort zizmor) ;;
   *)
     echo "ci-doctor: expected source-scan|fast|lint|contract|security|docs|required|audit|audit-components|nightly|history|links|advisory|coverage|platform|toolchain-msrv|all" >&2
     exit 2
@@ -44,14 +44,8 @@ for tool in "${tools[@]}"; do
 done
 [[ "$missing" -eq 0 ]] || exit 1
 
-if [[ "$lane" == audit || "$lane" == audit-components || "$lane" == all ]]; then
-  python3 -I -S -c 'import tomllib; assert tomllib.loads("minimum_score = 85")["minimum_score"] == 85' || {
-    echo 'ci-doctor: AUDIT_TOML_PARSER_UNAVAILABLE (Python 3.11+ tomllib required)' >&2
-    exit 75
-  }
-fi
 if [[ "$lane" == audit-components ]]; then
-  python3 -I -S -c 'import os, sys; assert sys.platform == "linux" and os.uname().machine == "x86_64"' || {
+  [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || {
     echo 'ci-doctor: AUDIT_COMPONENT_PROFILE_UNAVAILABLE (local Linux x86_64 required)' >&2
     exit 75
   }
@@ -79,14 +73,14 @@ if [[ "$lane" == toolchain-msrv ]]; then
   }
 fi
 
-if [[ "$lane" =~ ^(fast|lint|contract|security|docs|required|advisory|coverage|platform|all)$ ]]; then
+if [[ "$lane" =~ ^(fast|lint|contract|security|docs|required|advisory|coverage|platform|audit-components|all)$ ]]; then
   rust_version="$(rustc --version)"
   [[ "$rust_version" == "rustc 1.97.1 "* ]] || {
     printf 'ci-doctor: expected rustc 1.97.1, found %s\n' "$rust_version" >&2
     exit 1
   }
 fi
-if [[ "$lane" =~ ^(fast|lint|contract|required|coverage|all)$ ]]; then
+if [[ "$lane" =~ ^(fast|lint|contract|required|coverage|audit-components|all)$ ]]; then
   nextest_version="$(cargo-nextest --version)"
   [[ "$nextest_version" == "cargo-nextest 0.9.137 "* ]] || {
     printf 'ci-doctor: expected cargo-nextest 0.9.137, found %s\n' "$nextest_version" >&2
@@ -125,19 +119,15 @@ if [[ "$lane" == coverage ]]; then
     exit 1
   }
 fi
-if [[ "$lane" == audit || "$lane" == all ]]; then
+if [[ "$lane" == audit ]]; then
   # Only this local profile admits Jankurai; candidate code cannot run a version
   # probe until its exact reviewed bytes have been copied, verified and sealed.
   repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  for directory in "$repo_root/target" "$repo_root/target/jankurai" \
-    "$repo_root/target/jankurai/tool-probes"; do
-    [[ ! -L "$directory" && ( ! -e "$directory" || -d "$directory" ) ]] || {
-      printf 'ci-doctor: refused auditor evidence directory %s\n' "$directory" >&2
-      exit 1
-    }
-  done
-  if [[ -n "$audit_run" ]]; then
-    expected="$repo_root/target/jankurai/audit-runs/"
+  if [[ -z "$audit_run" ]]; then
+    echo 'ci-doctor: AUDIT_BOOTSTRAP_REQUIRED; run bash scripts/ci-local.sh audit' >&2
+    exit 75
+  fi
+  expected="$repo_root/target/jankurai/audit-runs/"
     suffix="${audit_run#"$expected"}"
     [[ "$audit_run" == "$expected"* && "$suffix" =~ ^run\.[A-Za-z0-9]{8}$ \
       && -d "$audit_run" && ! -L "$audit_run" \
@@ -150,14 +140,11 @@ if [[ "$lane" == audit || "$lane" == all ]]; then
         origin:"dispatcher",parent_pid:$pid}
     ' "$audit_run/invocation.json" >/dev/null || exit 75
     record="$audit_run/doctor.tool.jsonl"
-  else
-    mkdir -p "$repo_root/target/jankurai/tool-probes"
-    probe="$(umask 077; mktemp -d "$repo_root/target/jankurai/tool-probes/probe.XXXXXXXX")"
-    record="$probe/tool.jsonl"
-  fi
   printf 'ci-doctor: auditor evidence %s\n' "$record" >&2
   candidate="$(type -P jankurai)"
-  python3 -I -S "$repo_root/ops/ci/jankurai-tool.py" --candidate "$candidate" \
-    --record "$record" -- --version
+  # shellcheck source=ops/ci/jankurai-bootstrap.sh
+  source "$repo_root/ops/ci/jankurai-bootstrap.sh"
+  audit_binary="$(jankurai_bootstrap_resolve "$audit_run")" || exit 75
+  "$audit_binary" --candidate "$candidate" --record "$record" -- --version
 fi
 printf 'ci-doctor: %s lane tools present\n' "$lane"
