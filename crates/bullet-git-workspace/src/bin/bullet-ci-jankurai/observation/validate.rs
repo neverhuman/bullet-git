@@ -1,5 +1,5 @@
 //! Independent settlement checks over the complete retained local audit inventory.
-use super::super::{Result, artifacts, io, paths, report_policy};
+use super::super::{artifacts, io, paths, report_policy, Result};
 use super::{common::*, inventory::Inventory, tool_record};
 use serde_json::Value;
 use std::collections::BTreeMap;
