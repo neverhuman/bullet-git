@@ -1,9 +1,11 @@
 # bullet-git
 
-[![CI](https://img.shields.io/badge/ci-local%20required-green.svg)](docs/testing.md)
-[![Jankurai](https://img.shields.io/badge/jankurai-audit-blue.svg)](docs/testing.md)
+[Checks and audit requirements](docs/testing.md)
 
 Agent-first repository kernel for Bullet Farm. Agents start at [`AGENTS.md`](AGENTS.md).
+
+For source onboarding, start at the public [Bullet Farm aggregate](https://github.com/neverhuman/bulletfarm).
+This repository is the [BulletGit member](https://github.com/neverhuman/bullet-git) used to develop this component.
 
 ```text
 ChangeId     stable engineering intention (chg_ + 64 lowercase hex)
@@ -24,7 +26,9 @@ See `docs/architecture.md` for the daemon protocol and trust model.
 just fast
 ```
 
-Run `just setup` once only if this checkout has not had dependencies prepared.
+For this member checkout, `just setup` performs source admission and prepares
+Rust dependencies before `just fast`. Follow the aggregate's instructions for
+family onboarding.
 
 ## Readiness
 
@@ -50,9 +54,9 @@ simulated inside BulletGit.
 | Lane | Command | Contents |
 | --- | --- | --- |
 | source-scan | `bash scripts/ci-local.sh source-scan` | gitleaks 8.21.2 admission over current source and lockfiles before dependency installation |
-| fast | `just fast` | exactly 43 types/journal cases through the nextest `fast` profile; nonzero assertion and sanitized JUnit |
+| fast | `just fast` | pinned types/journal test identities through the nextest `fast` profile; nonzero assertions, complete execution, and sanitized JUnit |
 | lint | `just lint` | formatting, strict Clippy, actionlint 1.7.8, zizmor 1.25.2, ShellCheck 0.10.0, and CI/inventory meta-guards |
-| contract | `just contract` | exactly 126 workspace/daemon cases through the nextest `contract` profile, including real local Git suites and the daemon round trip |
+| contract | `just contract` | pinned workspace/daemon test identities through the nextest `contract` profile, including real local Git suites and the daemon round trip; complete execution and assertion reports required |
 | security | `just security` | secret-shaped detector canary; fresh RustSec database; `cargo deny --locked check licenses advisories bans sources` against committed policy |
 | docs | `just docs` | relative Markdown links, warning-denied rustdoc, and doctests |
 | required | `just check` | source admission followed by fast, lint, contract, security, and docs sequentially, exactly once |

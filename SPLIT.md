@@ -2,7 +2,7 @@
 
 Status: first-build BulletGit kernel; component primitives, not release-ready
 Owner: Bullet Farm maintainers
-Last reviewed: 2026-08-26
+Last reviewed: 2026-09-11 (public source entry and remote roles)
 Applies to: bullet-git
 
 ## Role
@@ -33,20 +33,22 @@ protocol, refs, and protected updates belong to the forge (Jeryu/GitHub).
 
 ## Repositories
 
-- Initial source authority: Jeryu repository `root/bullet-git`
-  (`repos.manifest.toml`, family root)
-- Public GitHub index: `https://github.com/neverhuman/bulletfarm` (hub only;
-  not `neverhuman/bullet-farm` and not a `neverhuman/bullet-git` mirror); this
-  member has no separate GitHub publication remote and is never source
-  authority
-- Family lock entry: `bullet-git` at tag `v0.1.0-alpha.4` in
-  `bullet-farm/family.lock`; no newer BulletGit tag is published
+- Public family clone/build entry: [neverhuman/bulletfarm](https://github.com/neverhuman/bulletfarm).
+  The generated aggregate and canonical member checkouts are distinct source layouts.
+- Member source remote `origin`: [neverhuman/bullet-git](https://github.com/neverhuman/bullet-git),
+  as recorded in the family `repos.manifest.toml`.
+- Compatibility remote `jeryu`: repository `root/bullet-git` on
+  `git.neverhuman.org`, fetch-only under family policy; it is not `origin`.
+- The recorded family lock entry is `bullet-git` at tag `v0.1.0-alpha.4` in
+  `bullet-farm/family.lock`. This source-entry correction does not qualify a
+  newer tag or a release.
 
 ## Split Rules
 
-- Jeryu is the initial source forge; GitHub is a configurable effect adapter,
-  not source authority. GitHub never sees custom object types: at the forge
-  boundary everything is ordinary blobs, trees, commits, and refs.
+- GitHub hosts the public source aggregate and member origins. Forge effects
+  still require their configured adapter and authority gates. GitHub never
+  sees custom object types: at the forge boundary everything is ordinary
+  blobs, trees, commits, and refs.
 - Do not reimplement pack protocol. `bullet-gitd` is the capability daemon and
   the only workspace writer; no raw Git CLI in agent sandboxes
   (`agent/JANKURAI_STANDARD.md`).
@@ -63,9 +65,10 @@ protocol, refs, and protected updates belong to the forge (Jeryu/GitHub).
   positive test checker may stand in for it.
 - Zero new worktrees anywhere: the daemon refuses a `.git` file as
   `WORKTREE_FORBIDDEN`, and agents edit only the claimed canonical checkout.
-- Jeryu tags observed today are not annotated signed tags. `bullet-family
-  forge pin` refuses `UNSIGNED_FORGE_TAG` until they are (J-5 / OD-D). Do not
-  write "signed Jeryu tags" as a current fact.
+- The recorded Jeryu qualification blocker is `UNSIGNED_FORGE_TAG` (J-5 /
+  OD-D): `bullet-family forge pin` requires annotated signed tags. Remote
+  identity and source documentation do not clear this gate or establish that
+  current Jeryu tags are signed.
 
 ## Required Local Check
 
