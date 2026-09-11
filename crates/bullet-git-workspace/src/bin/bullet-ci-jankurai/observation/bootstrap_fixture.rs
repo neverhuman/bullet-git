@@ -1,6 +1,6 @@
 //! Explicitly synthetic Cargo/tool rows over real fixture files, never build proof.
 use super::super::{bootstrap, bootstrap_inputs};
-use super::{Fixture, json_bytes, write};
+use super::{json_bytes, write, Fixture};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

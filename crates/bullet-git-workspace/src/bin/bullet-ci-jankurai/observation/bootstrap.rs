@@ -1,8 +1,8 @@
 //! The compiler receipt is checked against retained output and current inputs.
 //! Cache/build intermediates are excluded explicitly; they are not proof inputs.
-use super::super::{Result, artifacts, io, paths, report_policy};
+use super::super::{artifacts, io, paths, report_policy, Result};
 use super::{bootstrap_inputs, common::require, inventory::Inventory};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::os::fd::AsRawFd;
