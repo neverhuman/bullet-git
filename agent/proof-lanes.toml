@@ -85,3 +85,9 @@ name = "platform"
 command = "bash scripts/ci-local.sh platform"
 purpose = "macOS/Windows all-target compile plus existing AUTHORITY_CONTRACT_UNAVAILABLE zero-mutation test"
 requires_network = false
+
+[[lane]]
+name = "audit-components"
+command = "just audit-components"
+purpose = "local Linux x86_64/Python3.11 audit shell, sealed-ELF helper and observation component suites; synthetic reports are not installed auditor evidence"
+requires_network = false
