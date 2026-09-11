@@ -27,9 +27,10 @@ serde_json = "1"
 sha2 = "=0.10.9"
 serde_jcs = "0.2"
 tempfile = "3"
+toml = "=0.8.23"
 thiserror = "2"
 unicode-normalization = "0.1"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
