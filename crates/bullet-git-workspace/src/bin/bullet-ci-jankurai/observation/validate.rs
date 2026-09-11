@@ -1,5 +1,5 @@
 //! Independent settlement checks over the complete retained local audit inventory.
-use super::super::{artifacts, io, report_policy, Result};
+use super::super::{Result, artifacts, io, paths, report_policy};
 use super::{common::*, inventory::Inventory, tool_record};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -101,6 +101,13 @@ pub(super) fn validate(
             for suffix in ["stdout", "stderr"] {
                 inventory.get(&format!("{name}.validation.{suffix}"))?;
             }
+            if inventory.exit(&format!("{name}.validation.exit"))? == 0
+                || inventory
+                    .data
+                    .contains_key(&format!("{name}.validation.argv"))
+            {
+                validation_argv(inventory, root, run, name)?;
+            }
         }
         let argv = native_argv(run, name);
         tools.insert(
@@ -192,6 +199,47 @@ pub(super) fn validate(
         }
     }
     Ok(())
+}
+
+fn validation_argv(inventory: &Inventory, root: &str, run: &str, name: &str) -> Result<()> {
+    let raw = inventory.get(&format!("{name}.validation.argv"))?;
+    let args: Vec<&str> = raw
+        .strip_suffix(b"\0")
+        .ok_or("VALIDATION_ARGV_TERMINATOR")?
+        .split(|b| *b == 0)
+        .map(std::str::from_utf8)
+        .collect::<std::result::Result<_, _>>()
+        .map_err(io)?;
+    let runtime = *args.get(5).ok_or("VALIDATION_ARGV_INCOMPLETE")?;
+    paths::absolute_parts(runtime)?;
+    require(
+        !std::path::Path::new(runtime).starts_with(root),
+        "VALIDATION_RUNTIME_WITHIN_SOURCE",
+    )?;
+    let mut expected = vec![
+        format!(
+            "{root}/target/jankurai/bootstrap/{}/target/debug/bullet-ci-jankurai",
+            run.rsplit('/').next().ok_or("VALIDATION_RUN_INVALID")?
+        ),
+        "report".into(),
+        "--root".into(),
+        root.into(),
+        "--runtime".into(),
+        runtime.into(),
+        "--report".into(),
+        if name == "ratchet" {
+            format!("{run}/ratchet.json")
+        } else {
+            format!("{root}/.jankurai/repo-score.json")
+        },
+    ];
+    if name == "ratchet" {
+        expected.extend([
+            "--baseline".into(),
+            format!("{root}/target/jankurai/accepted-baseline.json"),
+        ]);
+    }
+    require(args == expected, "VALIDATION_ARGV_MISMATCH")
 }
 
 pub(super) fn native_argv(run: &str, name: &str) -> Vec<String> {

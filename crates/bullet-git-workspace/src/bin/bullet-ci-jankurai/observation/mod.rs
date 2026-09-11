@@ -1,6 +1,10 @@
 //! Local unsigned diagnostics only; no source-admission or release authority.
 #[cfg(test)]
 mod advanced_tests;
+mod bootstrap;
+mod bootstrap_inputs;
+#[cfg(test)]
+mod bootstrap_tests;
 mod cli;
 mod common;
 #[cfg(test)]
@@ -11,10 +15,10 @@ mod tests;
 mod tool_record;
 mod validate;
 
-use super::{artifacts, io, paths, report::Repository, report_policy, Result};
+use super::{Result, artifacts, io, paths, report::Repository, report_policy};
 use common::*;
 use inventory::Inventory;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -82,6 +86,7 @@ pub(super) fn collect(
     let mut tools = BTreeMap::new();
     let validation = (|| -> Result<()> {
         inventory.scan(run)?;
+        bootstrap::collect(&mut inventory, root, run)?;
         let repository = Repository::new(root, runtime)?;
         git_subject = Some(repository.tool_subject());
         let (head, policy) = repository.policy()?;
@@ -97,9 +102,13 @@ pub(super) fn collect(
         clean = repository
             .git(&["status", "--porcelain", "--untracked-files=normal"])?
             .is_empty();
+        let build_inputs = bootstrap::validate(&inventory, root, run)?;
         validate::validate(&inventory, root, run, status, &policy.bytes, &mut tools)?;
         inventory.recheck()?;
         policy.recheck()?;
+        for input in build_inputs {
+            input.recheck()?;
+        }
         require(repository.head()? == head, "COMMIT_CHANGED")?;
         Ok(())
     })();
@@ -110,9 +119,11 @@ pub(super) fn collect(
         json!({"schema_version":SCHEMA,"repository":"bullet-git","commit_oid":commit,"tree_oid":tree,
         "clean":clean,"invocation":invocation,"run_path":run,"signed":false,"evidence_class":CLASS,
         "artifact_hashes":inventory.subjects(),"tools":tools,"git_tool":git_subject,"policy_subject":policy_subject,
+        "bootstrap_artifact_root":format!("{root}/target/jankurai/bootstrap/{}",run.rsplit('/').next().unwrap_or_default()),
         "primary_status":status,"integrity_issues":inventory.issues,"omitted_artifacts":inventory.omissions,
         "outcome":if status == 0 && inventory.issues.is_empty() {"PASS"} else {"FAIL"},
         "producer_outputs_excluded":PRODUCER,
+        "bootstrap_intermediates_excluded":"target/ except the exact emitted target/debug/bullet-ci-jankurai; cache contents are not accepted proof inputs",
         "limitations":"Unsigned local point-in-time diagnostics; no continuous source/runtime custody, installed distribution or aggregate event acceptance"}),
     )
 }
