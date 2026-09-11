@@ -7,10 +7,15 @@ bash ops/ci/audit-test.sh
 mkdir -p target/jankurai/component-runs
 run="$(mktemp -d "$PWD/target/jankurai/component-runs/run.XXXXXXXX")"
 export CARGO_TARGET_DIR="$run/target"
+# Cargo's target directory does not relocate Nextest's workspace-relative store.
+# A unique lower-priority tool config keeps the repository's test profile intact.
+jq -nr --arg directory "$CARGO_TARGET_DIR/nextest" \
+  '"[store]\ndir = " + ($directory | tojson)' >"$run/nextest.toml"
 # nextest rejects empty selection and retains individual completed identities.
 # The same binary's tests are also selected by the canonical contract partition.
 list=(cargo nextest list --locked --offline --package bullet-git-workspace --bin bullet-ci-jankurai --message-format json)
-execute=(cargo nextest run --locked --offline --package bullet-git-workspace --bin bullet-ci-jankurai --profile contract)
+execute=(cargo nextest run --locked --offline --package bullet-git-workspace --bin bullet-ci-jankurai --profile contract
+  --tool-config-file "bullet-audit:$run/nextest.toml")
 printf '%s\0' "${list[@]}" >"$run/selection.argv"
 status=0
 "${list[@]}" >"$run/selection.json" 2>"$run/selection.stderr" || status=$?
