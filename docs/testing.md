@@ -21,8 +21,8 @@ lanes in parallel after source admission and converges through `CI / required`.
 | --- | --- | --- | --- |
 | source-scan | `ops/ci/source-scan.sh` | gitleaks 8.21.2 scans the current source and lockfiles before project dependencies are installed | `bash scripts/ci-local.sh source-scan` |
 | fast | `ops/ci/fast.sh` | the configured 62-case types/journal partition; nonzero assertion and sanitized JUnit | `bash scripts/ci-local.sh fast` |
-| lint | `ops/ci/lint.sh` | format, strict Clippy, actionlint 1.7.8, zizmor 1.25.2, ShellCheck 0.10.0, and meta-guards proving 62 + 171 = all 233 selected tests | `bash scripts/ci-local.sh lint` |
-| contract | `ops/ci/contract.sh` | the configured 171-case workspace/daemon partition, including real local Git and the daemon round trip; nonzero assertion and sanitized JUnit | `bash scripts/ci-local.sh contract` |
+| lint | `ops/ci/lint.sh` | format, strict Clippy, actionlint 1.7.8, zizmor 1.25.2, ShellCheck 0.10.0, and meta-guards proving 62 + 271 = all 333 selected tests | `bash scripts/ci-local.sh lint` |
+| contract | `ops/ci/contract.sh` | the configured 271-case workspace/daemon partition, including real local Git and the daemon round trip; nonzero assertion and sanitized JUnit | `bash scripts/ci-local.sh contract` |
 | security | `ops/ci/security.sh` | synthetic finding canary plus all cargo-deny license, advisory, ban, and source policies against a fresh RustSec database | `bash scripts/ci-local.sh security` |
 | docs | `ops/ci/docs.sh` | relative links, warning-denied rustdoc, and doctests | `bash scripts/ci-local.sh docs` |
 | required | `ops/ci/required.sh` | source admission followed by fast, lint, contract, security, and docs exactly once | `bash scripts/ci-local.sh required` |

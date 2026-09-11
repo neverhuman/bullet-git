@@ -23,7 +23,7 @@ requires_network = false
 [[lane]]
 name = "contract"
 command = "just contract"
-purpose = "Configured 171-case nonzero workspace/daemon partition plus six exact corpus-replay outcomes for patch and local-config oracles"
+purpose = "Configured 271-case nonzero workspace/daemon partition plus six exact corpus-replay outcomes for patch and local-config oracles"
 requires_network = false
 
 [[lane]]

@@ -6,8 +6,9 @@ export GIT_TERMINAL_PROMPT=0
 FAST_FILTER='package(bullet-git-types) | package(bullet-git-journal)'
 CONTRACT_FILTER='package(bullet-git-workspace) | package(bullet-gitd)'
 FAST_EXPECTED_TESTS=62
-CONTRACT_EXPECTED_TESTS=171
-TOTAL_EXPECTED_TESTS=233
+# Includes 100 bullet-ci-jankurai component tests in the workspace package.
+CONTRACT_EXPECTED_TESTS=271
+TOTAL_EXPECTED_TESTS=333
 export FAST_FILTER CONTRACT_FILTER FAST_EXPECTED_TESTS CONTRACT_EXPECTED_TESTS TOTAL_EXPECTED_TESTS
 
 log() { printf '[ci] %s\n' "$*"; }
