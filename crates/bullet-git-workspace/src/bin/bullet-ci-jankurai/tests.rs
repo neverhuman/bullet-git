@@ -1,6 +1,8 @@
 //! Retained actual-filesystem/ELF fixtures, never installed auditor acceptance.
 #[path = "admission_tests.rs"]
 mod admission_tests;
+#[path = "fd_diagnostics.rs"]
+mod fd_diagnostics;
 use super::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -14,6 +16,7 @@ pub(super) struct Fixture {
     pub(super) root: PathBuf,
     pub(super) candidate: String,
     pub(super) record: String,
+    descriptor_baseline: Value,
     hash: String,
     size: u64,
     _serial: MutexGuard<'static, ()>,
@@ -30,6 +33,7 @@ impl Fixture {
             .expect("private fixture")
             .keep();
         eprintln!("retained CI fixture: {}", root.display());
+        let descriptor_baseline = fd_diagnostics::capture();
         let candidate = root.join("candidate");
         fs::copy("/usr/bin/true", &candidate).expect("actual local ELF fixture");
         fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)).unwrap();
@@ -38,6 +42,7 @@ impl Fixture {
             candidate: candidate.to_str().unwrap().into(),
             record: root.join("tool.jsonl").to_str().unwrap().into(),
             root,
+            descriptor_baseline,
             hash: hex::encode(Sha256::digest(&bytes)),
             size: bytes.len() as u64,
             _serial: serial,
@@ -90,6 +95,29 @@ impl Fixture {
     }
     pub(super) fn no_start(&self) {
         assert!(self.rows().iter().all(|row| row["event"] != "started"));
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Keep the actual refusal/assertion first. Diagnostics never grant
+            // descriptor authority or change the production execution result.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "CI_FIXTURE_FD_BASELINE: {}",
+                self.descriptor_baseline
+            );
+            if fs::write(
+                self.root.join("descriptor-baseline.json"),
+                self.descriptor_baseline.to_string(),
+            )
+            .is_err()
+            {
+                let _ = writeln!(std::io::stderr(), "CI_FIXTURE_FD_BASELINE_RETENTION_FAILED");
+            }
+        }
     }
 }
 
