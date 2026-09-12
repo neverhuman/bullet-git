@@ -76,6 +76,51 @@ fn inventory(pid: u32) -> Result<Vec<u32>, &'static str> {
     Ok(result)
 }
 
+// Runner v2.337.0 ProcessChannel creates two inheritable client handles;
+// JobDispatcher launches Runner.Worker with exactly spawnclient <in> <out>.
+// https://github.com/actions/runner/blob/v2.337.0/src/Runner.Common/ProcessChannel.cs
+// https://github.com/actions/runner/blob/v2.337.0/src/Runner.Listener/JobDispatcher.cs
+// Names/argv are classified internally only. These booleans are diagnostic
+// observations, not authentication of the runner binary or cleanup authority.
+fn worker_channel(pid: u32, subjects: &[Value]) -> Value {
+    let role = fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .is_some_and(|path| path.file_name().is_some_and(|name| name == "Runner.Worker"));
+    if !role {
+        return json!({"runner_worker_name":false,"spawnclient_pair_matches":false});
+    }
+    let pair = (|| -> Option<[u32; 2]> {
+        let argv = text(&format!("/proc/{pid}/cmdline")).ok()?;
+        let parts: Vec<_> = argv.strip_suffix('\0')?.split('\0').collect();
+        if parts.len() != 4
+            || parts[1] != "spawnclient"
+            || std::path::Path::new(parts[0]).file_name()? != "Runner.Worker"
+        {
+            return None;
+        }
+        let mut pair = [0; 2];
+        for (slot, value) in pair.iter_mut().zip(&parts[2..]) {
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            *slot = value.parse().ok()?;
+            if *slot < 3 {
+                return None;
+            }
+        }
+        (pair[0] != pair[1]).then_some(pair)
+    })();
+    let matches = pair.is_some_and(|pair| {
+        subjects.len() == 2
+            && pair.iter().all(|fd| {
+                subjects
+                    .iter()
+                    .any(|subject| subject["fd"].as_u64() == Some(u64::from(*fd)))
+            })
+    });
+    json!({"runner_worker_name":role,"spawnclient_pair_matches":matches})
+}
+
 fn capture_inner() -> Result<Value, &'static str> {
     let pid = std::process::id();
     let (mut parent, start) = process(pid)?;
@@ -122,8 +167,9 @@ fn capture_inner() -> Result<Value, &'static str> {
             };
             matches.push(value);
         }
+        let worker_channel = worker_channel(ancestor_pid, &subjects);
         let stable = process(ancestor_pid) == Ok((next, ancestor_start));
-        ancestors.push(json!({"pid":ancestor_pid,"start_ticks":ancestor_start,"parent":next,"stable":stable,"same_number_fds":matches}));
+        ancestors.push(json!({"pid":ancestor_pid,"start_ticks":ancestor_start,"parent":next,"stable":stable,"worker_channel":worker_channel,"same_number_fds":matches}));
         if next == ancestor_pid {
             return Err("ANCESTOR_CYCLE");
         }
