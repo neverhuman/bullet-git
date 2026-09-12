@@ -8,6 +8,22 @@ lane="${1:-}"
 expected_commit="${2:-}"
 artifact_root="${3:-.ci-artifacts}"
 mode="${4:-atomic}"
+if [[ "$lane" == audit ]]; then
+  [[ "$expected_commit" =~ ^[0-9a-f]{40}$ && "$mode" == atomic \
+    && ( "$artifact_root" == .ci-artifacts || "$artifact_root" == "$REPO_ROOT/.ci-artifacts" ) ]] || {
+    echo '[ci] AUDIT_LOCAL_ARTIFACT_SUBJECT_REQUIRED: exact local root, commit and atomic mode' >&2
+    exit 1
+  }
+  # Audit records are local point-in-time diagnostics. Their absolute run/tool
+  # subjects are not portable aggregate or installed-distribution evidence.
+  # A historical receipt cannot choose the executable that checks itself.
+  # shellcheck source=ops/ci/jankurai-bootstrap.sh
+  source "$REPO_ROOT/ops/ci/jankurai-bootstrap.sh"
+  checker_run="$(jankurai_bootstrap_check_prepare)" || exit "$?"
+  checker_binary="$(jankurai_bootstrap_resolve "$checker_run" check)" || exit 75
+  runtime_parent="$(mktemp -d "${TMPDIR:-/tmp}/bullet-audit-check.XXXXXXXX")" || exit 1
+  exec "$checker_binary" check --root "$REPO_ROOT" --runtime "$runtime_parent/check" --commit "$expected_commit"
+fi
 case "$lane" in
   source-scan|fast|lint|contract|security|docs|history|links|advisory|coverage|platform) ;;
   *) echo "usage: $0 <lane> <commit> [artifact-root [atomic|merged]]" >&2; exit 2 ;;

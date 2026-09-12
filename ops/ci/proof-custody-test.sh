@@ -12,7 +12,7 @@ child_pid=
 cleanup() {
   [[ -z "$owner_pid" ]] || kill -KILL "$owner_pid" 2>/dev/null || true
   [[ -z "$child_pid" ]] || kill -KILL "$child_pid" 2>/dev/null || true
-  rm -rf -- "$test_root"
+  printf '[ci] proof custody fixture retained: %s\n' "$test_root"
 }
 trap cleanup EXIT
 mkdir -p "$fixture/.git" "$fixture/scripts" "$fixture/ops/ci" "$outside"
@@ -25,6 +25,11 @@ printf 'doctor:%s\n' "$$" >>children
 printf '%s\n' "$1" >doctor-lane
 [[ ${BULLET_CI_PROOF_CUSTODY+x} ]] && state=present || state=unset
 printf '%s\n' "$state" >doctor-token-state
+if [[ "$1" == audit ]]; then
+  [[ "$2" == --audit-run && -f "$3/invocation.json" ]] || exit 96
+  printf '%s\n' "$3" >doctor-run
+fi
+exit "${CI_FIXTURE_DOCTOR_STATUS:-0}"
 FIXTURE
 cat >"$fixture/ops/ci/fast.sh" <<'FIXTURE'
 #!/usr/bin/env bash
@@ -62,6 +67,26 @@ printf '%s\n' "$1" >observation-lane
 printf '%s\n' "$state" >observation-token-state
 mkdir -p .ci-artifacts/observations
 printf 'status=%s\n' "$2" >".ci-artifacts/observations/$1.json"
+if [[ "$1" == audit ]]; then
+  [[ "$3" == --audit-run && -f "$4/invocation.json" ]] || exit 96
+  printf '%s\n' "$4" >observation-run
+fi
+exit "${CI_FIXTURE_OBSERVATION_STATUS:-0}"
+FIXTURE
+cat >"$fixture/ops/ci/audit.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+set -eu
+[[ "$1" == --audit-run && -f "$2/invocation.json" ]]
+printf 'started\n' >"$2/stub-audit-started"
+exit "${CI_FIXTURE_STATUS:-0}"
+FIXTURE
+# This dispatcher fixture records a real function invocation but never compiles.
+cat >"$fixture/ops/ci/jankurai-bootstrap.sh" <<'FIXTURE'
+jankurai_bootstrap_prepare() {
+  [[ $# -eq 1 && -f "$1/invocation.json" ]] || return 96
+  printf 'started\n' >"$1/stub-bootstrap-started"
+  return "${CI_FIXTURE_BOOTSTRAP_STATUS:-0}"
+}
 FIXTURE
 chmod +x "$fixture/scripts/"*.sh "$fixture/ops/ci/fast.sh" "$fixture/ops/ci/required.sh"
 
@@ -167,6 +192,60 @@ set -e
 [[ "$failure_status" -eq 19 && ! -e "$lock" \
   && "$(<"$fixture/.ci-artifacts/observations/fast.json")" == status=19 ]] \
   || { refuse CI_PROOF_FAIL_RELEASE_INVALID bullet-git; exit 1; }
+
+# Execute the actual dispatcher with distinct native and observer failures.
+for pair in '0:41' '19:19'; do
+  IFS=: read -r primary expected <<<"$pair"
+  actual=0
+  CI_FIXTURE_STATUS="$primary" CI_FIXTURE_OBSERVATION_STATUS=41 \
+    bash "$fixture/scripts/ci-local.sh" fast >"$fixture/observer-$primary.log" 2>&1 || actual=$?
+  [[ "$actual" -eq "$expected" && ! -e "$lock" ]]
+done
+previous_run=
+for scenario in '0:0:0:0' '0:19:41:19' '29:19:41:29'; do
+  IFS=: read -r doctor native observer expected <<<"$scenario"
+  printf 'old audit %s\n' "$scenario" >"$fixture/.ci-artifacts/observations/audit.json"
+  actual=0
+  BULLET_CI_AUDIT_RUN_DIR="$previous_run" CI_FIXTURE_DOCTOR_STATUS="$doctor" \
+    CI_FIXTURE_STATUS="$native" CI_FIXTURE_OBSERVATION_STATUS="$observer" \
+    bash "$fixture/scripts/ci-local.sh" audit >"$fixture/audit-$scenario.log" 2>&1 || actual=$?
+  [[ "$actual" -eq "$expected" && ! -e "$lock" ]]
+  run="$(<"$fixture/doctor-run")"
+  [[ "$run" != "$previous_run" && "$run" == "$(<"$fixture/observation-run")" ]]
+  [[ "$(<"$run/previous-observation.json")" == "old audit $scenario" ]]
+  [[ -f "$run/stub-bootstrap-started" && "$(<"$run/bootstrap.exit")" -eq 0 ]]
+  [[ "$(<"$run/doctor.exit")" -eq "$doctor" && "$(<"$run/observation.exit")" -eq "$observer" ]]
+  jq -e --arg id "${run##*/}" --arg root "$fixture" \
+    '.schema=="bullet.audit-invocation.v1" and .id==$id and .repository==$root and .origin=="dispatcher"' \
+    "$run/invocation.json" >/dev/null
+  if [[ "$doctor" -eq 0 ]]; then
+    [[ -f "$run/stub-audit-started" && "$(<"$run/lane.exit")" -eq "$native" ]]
+  else
+    [[ ! -e "$run/stub-audit-started" && ! -e "$run/lane.exit" ]]
+  fi
+  previous_run="$run"
+done
+# A real dispatcher bootstrap function failure must not launch doctor or audit,
+# and must retain its original status without requiring the unbuilt observer.
+children_before="$(line_count "$fixture/children")"
+observations_before="$(line_count "$fixture/observation-calls")"
+status=0
+CI_FIXTURE_BOOTSTRAP_STATUS=23 bash "$fixture/scripts/ci-local.sh" audit \
+  >"$fixture/bootstrap-failed.stdout" 2>"$fixture/bootstrap-failed.stderr" || status=$?
+printf '%s\n' "$status" >"$fixture/bootstrap-failed.exit"
+[[ "$status" -eq 23 && ! -e "$lock" &&
+  "$(line_count "$fixture/children")" -eq "$children_before" &&
+  "$(line_count "$fixture/observation-calls")" -eq "$observations_before" ]]
+failed_bootstraps=0
+for candidate in "$fixture/target/jankurai/audit-runs"/run.*; do
+  if [[ -f "$candidate/bootstrap.exit" && "$(<"$candidate/bootstrap.exit")" == 23 ]]; then
+    failed_bootstraps=$((failed_bootstraps + 1))
+    [[ -f "$candidate/stub-bootstrap-started" && ! -e "$candidate/doctor.exit" &&
+      ! -e "$candidate/stub-audit-started" && ! -e "$candidate/observation.exit" ]]
+  fi
+done
+[[ "$failed_bootstraps" -eq 1 ]]
+log "actual dispatcher fresh audit identities, doctor refusal and primary failure preservation passed"
 
 assert_alias_custody gates
 assert_alias_custody all

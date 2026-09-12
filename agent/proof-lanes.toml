@@ -11,7 +11,7 @@ requires_network = false
 [[lane]]
 name = "fast"
 command = "just fast"
-purpose = "43-case nonzero types/journal nextest partition with sanitized JUnit"
+purpose = "Configured 62-case nonzero types/journal nextest partition with sanitized JUnit"
 requires_network = false
 
 [[lane]]
@@ -23,7 +23,7 @@ requires_network = false
 [[lane]]
 name = "contract"
 command = "just contract"
-purpose = "126-case nonzero workspace/daemon partition plus six exact corpus-replay outcomes for patch and local-config oracles"
+purpose = "Configured 271-case nonzero workspace/daemon partition plus six exact corpus-replay outcomes for patch and local-config oracles"
 requires_network = false
 
 [[lane]]
@@ -84,4 +84,10 @@ requires_network = false
 name = "platform"
 command = "bash scripts/ci-local.sh platform"
 purpose = "macOS/Windows all-target compile plus existing AUTHORITY_CONTRACT_UNAVAILABLE zero-mutation test"
+requires_network = false
+
+[[lane]]
+name = "audit-components"
+command = "just audit-components"
+purpose = "local Linux x86_64/Python3.11 audit shell, sealed-ELF helper and observation component suites; synthetic reports are not installed auditor evidence"
 requires_network = false

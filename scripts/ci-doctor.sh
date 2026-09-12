@@ -2,15 +2,24 @@
 set -euo pipefail
 
 lane="${1:-all}"
+audit_run=""
+if [[ $# -gt 1 ]]; then
+  [[ $# -eq 3 && "$lane" == audit && "$2" == --audit-run ]] || {
+    echo 'ci-doctor: only audit accepts --audit-run <dispatcher-owned-run>' >&2
+    exit 2
+  }
+  audit_run="$3"
+fi
 case "$lane" in
   source-scan) tools=(bash dirname git gitleaks jq) ;;
   fast) tools=(bash cargo cargo-nextest cp dirname git jq rustc) ;;
-  lint) tools=(actionlint bash cargo cargo-clippy cargo-nextest cmp comm dirname git jq mktemp rustc rustfmt shellcheck sort zizmor) ;;
+  lint) tools=(actionlint bash cargo cargo-clippy cargo-nextest cmp comm dirname git jq mktemp python3 rustc rustfmt shellcheck sort zizmor) ;;
   contract) tools=(bash cargo cargo-nextest cp dirname git jq rustc) ;;
   security) tools=(bash cargo cargo-deny date dirname git gitleaks jq rustc) ;;
   docs) tools=(bash cargo dirname git jq readlink rustc) ;;
-  required) tools=(actionlint bash cargo cargo-clippy cargo-deny cargo-nextest cmp comm cp date dirname git gitleaks jq mktemp readlink rustc rustfmt shellcheck sort zizmor) ;;
-  audit) tools=(bash dirname git jankurai jq mkdir) ;;
+  required) tools=(actionlint bash cargo cargo-clippy cargo-deny cargo-nextest cmp comm cp date dirname git gitleaks jq mktemp python3 readlink rustc rustfmt shellcheck sort zizmor) ;;
+  audit) tools=(bash cargo cat cmp cp cut dirname env git jankurai jq mkdir mktemp mv realpath rm rustc sha256sum sort stat sync) ;;
+  audit-components) tools=(bash cargo cargo-nextest cat chmod cmp cp cut dirname env git jq just ln mkdir mktemp mv realpath rm rustc sha256sum sort stat sync uname) ;;
   nightly) tools=(bash dirname git jq) ;;
   history) tools=(bash dirname git gitleaks jq) ;;
   links) tools=(bash curl dirname git jq sort) ;;
@@ -18,9 +27,9 @@ case "$lane" in
   coverage) tools=(bash cargo cargo-llvm-cov cargo-nextest dirname git jq rustc) ;;
   platform) tools=(awk bash cargo dirname git jq rustc) ;;
   toolchain-msrv) tools=(b3sum bash cargo dirname git jq rustc rustup) ;;
-  all) tools=(actionlint bash cargo cargo-clippy cargo-deny cargo-nextest cmp comm cp date dirname git gitleaks jankurai jq mkdir mktemp readlink rustc rustfmt shellcheck sort zizmor) ;;
+  all) tools=(actionlint bash cargo cargo-clippy cargo-deny cargo-nextest cmp comm cp date dirname git gitleaks jq mkdir mktemp python3 readlink rustc rustfmt shellcheck sort zizmor) ;;
   *)
-    echo "ci-doctor: expected source-scan|fast|lint|contract|security|docs|required|audit|nightly|history|links|advisory|coverage|platform|toolchain-msrv|all" >&2
+    echo "ci-doctor: expected source-scan|fast|lint|contract|security|docs|required|audit|audit-components|nightly|history|links|advisory|coverage|platform|toolchain-msrv|all" >&2
     exit 2
     ;;
 esac
@@ -34,6 +43,20 @@ for tool in "${tools[@]}"; do
   fi
 done
 [[ "$missing" -eq 0 ]] || exit 1
+
+if [[ "$lane" == audit-components ]]; then
+  [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || {
+    echo 'ci-doctor: AUDIT_COMPONENT_PROFILE_UNAVAILABLE (local Linux x86_64 required)' >&2
+    exit 75
+  }
+  # The component matrix invokes the real score recipe. Presence alone admits
+  # older just binaries that cannot parse this repository's recipe attributes.
+  component_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  just --justfile "$component_root/Justfile" --summary >/dev/null || {
+    echo 'ci-doctor: AUDIT_COMPONENT_JUSTFILE_UNSUPPORTED; select a compatible just binary' >&2
+    exit 1
+  }
+fi
 
 if [[ "$lane" == toolchain-msrv ]]; then
   rust_version="$(rustc --version)"
@@ -57,14 +80,14 @@ if [[ "$lane" == toolchain-msrv ]]; then
   }
 fi
 
-if [[ "$lane" =~ ^(fast|lint|contract|security|docs|required|advisory|coverage|platform|all)$ ]]; then
+if [[ "$lane" =~ ^(fast|lint|contract|security|docs|required|advisory|coverage|platform|audit-components|all)$ ]]; then
   rust_version="$(rustc --version)"
   [[ "$rust_version" == "rustc 1.97.1 "* ]] || {
     printf 'ci-doctor: expected rustc 1.97.1, found %s\n' "$rust_version" >&2
     exit 1
   }
 fi
-if [[ "$lane" =~ ^(fast|lint|contract|required|coverage|all)$ ]]; then
+if [[ "$lane" =~ ^(fast|lint|contract|required|coverage|audit-components|all)$ ]]; then
   nextest_version="$(cargo-nextest --version)"
   [[ "$nextest_version" == "cargo-nextest 0.9.137 "* ]] || {
     printf 'ci-doctor: expected cargo-nextest 0.9.137, found %s\n' "$nextest_version" >&2
@@ -103,10 +126,32 @@ if [[ "$lane" == coverage ]]; then
     exit 1
   }
 fi
-if [[ "$lane" == audit || "$lane" == all ]]; then
-  [[ "$(jankurai --version)" == "jankurai 1.6.11" ]] || {
-    echo "ci-doctor: expected jankurai 1.6.11" >&2
-    exit 1
-  }
+if [[ "$lane" == audit ]]; then
+  # Only this local profile admits Jankurai; candidate code cannot run a version
+  # probe until its exact reviewed bytes have been copied, verified and sealed.
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  if [[ -z "$audit_run" ]]; then
+    echo 'ci-doctor: AUDIT_BOOTSTRAP_REQUIRED; run bash scripts/ci-local.sh audit' >&2
+    exit 75
+  fi
+  expected="$repo_root/target/jankurai/audit-runs/"
+    suffix="${audit_run#"$expected"}"
+    [[ "$audit_run" == "$expected"* && "$suffix" =~ ^run\.[A-Za-z0-9]{8}$ \
+      && -d "$audit_run" && ! -L "$audit_run" \
+      && -f "$audit_run/invocation.json" && ! -L "$audit_run/invocation.json" ]] || exit 75
+    [[ "$(find "$audit_run" -maxdepth 0 -type d -uid "$(id -u)" -perm 0700 -print)" == "$audit_run" \
+      && "$(find "$audit_run/invocation.json" -maxdepth 0 -type f -uid "$(id -u)" -perm 0600 -print)" \
+        == "$audit_run/invocation.json" ]] || exit 75
+    jq -e --arg id "$suffix" --arg repository "$repo_root" --argjson pid "$PPID" '
+      . == {schema:"bullet.audit-invocation.v1",id:$id,repository:$repository,
+        origin:"dispatcher",parent_pid:$pid}
+    ' "$audit_run/invocation.json" >/dev/null || exit 75
+    record="$audit_run/doctor.tool.jsonl"
+  printf 'ci-doctor: auditor evidence %s\n' "$record" >&2
+  candidate="$(type -P jankurai)"
+  # shellcheck source=ops/ci/jankurai-bootstrap.sh
+  source "$repo_root/ops/ci/jankurai-bootstrap.sh"
+  audit_binary="$(jankurai_bootstrap_resolve "$audit_run")" || exit 75
+  "$audit_binary" --candidate "$candidate" --record "$record" -- --version
 fi
 printf 'ci-doctor: %s lane tools present\n' "$lane"

@@ -30,10 +30,11 @@ security:
 audit:
     bash scripts/ci-local.sh audit
 
+audit-components:
+    bash scripts/ci-local.sh audit-components
+
 score:
-    mkdir -p .jankurai
-    rm -f .jankurai/repo-score.json .jankurai/repo-score.md .jankurai/repair-queue.jsonl
-    jankurai audit . --full --no-score-history --json .jankurai/repo-score.json --md .jankurai/repo-score.md
+    bash scripts/ci-local.sh audit
 
 nextest-fast:
     cargo nextest run --locked --workspace

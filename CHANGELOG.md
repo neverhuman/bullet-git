@@ -21,6 +21,8 @@ heading may be added before the gates in `docs/release.md` hold with receipts.
 
 ### Changed
 
+- Public source links identify the family aggregate and the GitHub member;
+  Jeryu remains a fetch-only compatibility remote subject to its existing gates.
 - `agent/owner-map.json` and `agent/test-map.json` route every audited path,
   including gitignored lane output.
 - Journal batch publication names its staging file `staging` rather than
@@ -32,4 +34,4 @@ heading may be added before the gates in `docs/release.md` hold with receipts.
 - `agent/zyal/`: a ZYAL v1 runbook is a `RUN_FOREVER` daemon envelope and this
   component has no run-forever agent loop, so the stub was not a runbook.
 
-[Unreleased]: https://github.com/bullet-farm/bullet-git
+[Unreleased]: https://github.com/neverhuman/bullet-git

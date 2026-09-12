@@ -120,31 +120,122 @@ release_proof_lock() {
   }
 }
 
+prepare_audit_run() {
+  local directory previous="$REPO_ROOT/.ci-artifacts/observations/audit.json"
+  for directory in "$REPO_ROOT/target" "$REPO_ROOT/target/jankurai" \
+    "$REPO_ROOT/target/jankurai/audit-runs" "$REPO_ROOT/.ci-artifacts" \
+    "$REPO_ROOT/.ci-artifacts/observations"; do
+    [[ ! -L "$directory" && ( ! -e "$directory" || -d "$directory" ) ]] || return 75
+  done
+  mkdir -p "$REPO_ROOT/target/jankurai/audit-runs" || return 1
+  audit_run="$(umask 077; mktemp -d "$REPO_ROOT/target/jankurai/audit-runs/run.XXXXXXXX")" || return 1
+  # Identity belongs to this dispatcher invocation; never discover the latest run.
+  (umask 077; set -o noclobber
+    jq -n --arg id "${audit_run##*/}" --arg repository "$REPO_ROOT" --argjson pid "$$" \
+      '{schema:"bullet.audit-invocation.v1",id:$id,repository:$repository,
+        origin:"dispatcher",parent_pid:$pid}' >"$audit_run/invocation.json") || return 1
+  if [[ -L "$previous" || ( -e "$previous" && ! -f "$previous" ) ]]; then
+    return 75
+  elif [[ -f "$previous" ]]; then
+    # Atomic same-checkout preservation; no stale public observation remains to score.
+    mv -- "$previous" "$audit_run/previous-observation.json" || return 1
+  fi
+  printf 'ci-local: audit invocation %s\n' "$audit_run"
+}
+
+run_audit_stage() {
+  local name="$1" result=0 retained=0
+  shift
+  (umask 077; set -o noclobber; printf '%s\0' "$@" >"$audit_run/$name.argv") || return 1
+  if [[ "$name" == bootstrap ]]; then
+    # The build is an explicit shell-function stage, not a claimed external argv.
+    # Bash preserves the dispatcher's $$ in this subshell for invocation binding.
+    [[ $# -eq 2 && "$1" == jankurai_bootstrap_prepare ]] || return 2
+    (umask 077; set -o noclobber
+      "$@" >"$audit_run/$name.stdout" 2>"$audit_run/$name.stderr") || result=$?
+  else
+    (umask 077; set -o noclobber
+      exec "$@" >"$audit_run/$name.stdout" 2>"$audit_run/$name.stderr") || result=$?
+  fi
+  (umask 077; set -o noclobber
+    printf '%s\n' "$result" >"$audit_run/$name.exit") || retained=1
+  cat "$audit_run/$name.stdout" || retained=1
+  cat "$audit_run/$name.stderr" >&2 || retained=1
+  [[ "$result" -eq 0 ]] || return "$result"
+  [[ "$retained" -eq 0 ]]
+}
+
 run_observed() {
-  local custody_lane="$1" script="$2" observation_lane="${3:-$1}" status observation_status
+  local custody_lane="$1" script="$2" observation_lane="${3:-$1}" status observation_status audit_run=""
   acquire_proof_lock "$custody_lane" || return $?
+  if [[ "$observation_lane" == audit ]]; then
+    status=0
+    prepare_audit_run || status=$?
+    if [[ "$status" -ne 0 ]]; then
+      release_proof_lock || return $?
+      return "$status"
+    fi
+    # shellcheck source=ops/ci/jankurai-bootstrap.sh
+    source ops/ci/jankurai-bootstrap.sh
+    run_audit_stage bootstrap jankurai_bootstrap_prepare "$audit_run" || status=$?
+    if [[ "$status" -ne 0 ]]; then
+      local bootstrap_release=0
+      release_proof_lock || bootstrap_release=$?
+      printf 'ci-local: bootstrap primary status=%s release status=%s; native audit not launched\n' \
+        "$status" "$bootstrap_release" >&2
+      return "$status"
+    fi
+  fi
   set +e
-  bash scripts/ci-doctor.sh "$observation_lane"
+  if [[ -n "$audit_run" ]]; then
+    run_audit_stage doctor bash scripts/ci-doctor.sh audit --audit-run "$audit_run"
+  else
+    bash scripts/ci-doctor.sh "$observation_lane"
+  fi
   status=$?
   set -e
   verify_proof_lock || return $?
   if [[ "$status" -eq 0 ]]; then
     set +e
-    bash "$script"
+    if [[ -n "$audit_run" ]]; then
+      run_audit_stage lane bash "$script" --audit-run "$audit_run"
+    else
+      bash "$script"
+    fi
     status=$?
     set -e
     verify_proof_lock || return $?
   fi
   verify_proof_lock || return $?
   set +e
-  bash scripts/ci-observation.sh "$observation_lane" "$status" \
-    "bash scripts/ci-doctor.sh $observation_lane" "bash $script"
+  if [[ -n "$audit_run" ]]; then
+    run_audit_stage observation bash scripts/ci-observation.sh audit "$status" \
+      --audit-run "$audit_run" "bash scripts/ci-doctor.sh audit" "bash $script"
+  else
+    bash scripts/ci-observation.sh "$observation_lane" "$status" \
+      "bash scripts/ci-doctor.sh $observation_lane" "bash $script"
+  fi
   observation_status=$?
   set -e
   verify_proof_lock || return $?
   release_proof_lock || return $?
-  [[ "$observation_status" -eq 0 ]] || return "$observation_status"
-  return "$status"
+  if [[ "$observation_status" -ne 0 ]]; then
+    printf 'ci-local: primary status=%s observation status=%s\n' "$status" "$observation_status" >&2
+  fi
+  [[ "$status" -eq 0 ]] || return "$status"
+  return "$observation_status"
+}
+
+run_audit_components() {
+  local status=0 release_status=0
+  acquire_proof_lock audit-components || return $?
+  bash scripts/ci-doctor.sh audit-components && bash ops/ci/audit-components.sh || status=$?
+  release_proof_lock || release_status=$?
+  if [[ "$release_status" -ne 0 ]]; then
+    printf 'ci-local: component primary status=%s release status=%s\n' "$status" "$release_status" >&2
+  fi
+  [[ "$status" -eq 0 ]] || return "$status"
+  return "$release_status"
 }
 
 lane="${1:-required}"
@@ -157,6 +248,7 @@ case "$lane" in
   docs) run_observed docs ops/ci/docs.sh ;;
   required) run_observed required ops/ci/required.sh ;;
   audit) run_observed audit ops/ci/audit.sh ;;
+  audit-components) run_audit_components ;;
   nightly) run_observed nightly ops/ci/nightly.sh ;;
   history) run_observed history ops/ci/history.sh ;;
   links) run_observed links ops/ci/external-links.sh ;;
@@ -166,7 +258,7 @@ case "$lane" in
   toolchain-msrv) run_observed toolchain-msrv ops/ci/toolchain-msrv.sh ;;
   gates|all) run_observed "$lane" ops/ci/required.sh required ;;
   *)
-    echo "usage: $0 {source-scan|fast|lint|contract|security|docs|required|audit|nightly|history|links|advisory|coverage|platform|toolchain-msrv|all}" >&2
+    echo "usage: $0 {source-scan|fast|lint|contract|security|docs|required|audit|audit-components|nightly|history|links|advisory|coverage|platform|toolchain-msrv|all}" >&2
     exit 2
     ;;
 esac

@@ -334,4 +334,6 @@ CARGO_TARGET_DIR="$fuzz_fixture/private parent" PATH="$fuzz_fixture/bin:$PATH" \
 }
 [[ ! -e "$fuzz_fixture/repo/target" && ! -e "$fuzz_fixture/private parent" ]]
 log "actual fuzz helper private/default target and exact Cargo argv controls passed"
+# Linux artifact/TOML components have their own audit-components lane.
+# Portable required does not inherit that runtime capability.
 log "local parity controls passed"

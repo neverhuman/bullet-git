@@ -4,6 +4,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$REPO_ROOT"
 log "lint lane: formatting, Clippy, CI meta-guards, and pinned source linters"
+python3 ops/ci/runner-fds-test.py
 bash ops/ci/proof-custody-test.sh
 bash ops/ci/local-parity-test.sh
 bash ops/ci/test-partitions.sh
