@@ -37,7 +37,15 @@ fn descriptor(pid: u32, fd: u32) -> Result<Value, &'static str> {
     // target, readlink its name, or consume a socket/pipe/file's contents.
     let before = fs::metadata(&path).map_err(|_| "FD_STAT_FAILED")?;
     let info = text(&format!("/proc/{pid}/fdinfo/{fd}"))?;
-    let flags = super::super::descriptors::flags(&info).map_err(|_| "FD_FLAGS_INVALID")?;
+    let mut fields = info.lines().filter_map(|line| line.strip_prefix("flags:"));
+    let value = fields.next().ok_or("FD_FLAGS_INVALID")?.trim();
+    if fields.next().is_some()
+        || value.is_empty()
+        || !value.bytes().all(|byte| (b'0'..=b'7').contains(&byte))
+    {
+        return Err("FD_FLAGS_INVALID");
+    }
+    let flags = u64::from_str_radix(value, 8).map_err(|_| "FD_FLAGS_INVALID")?;
     let after = fs::metadata(&path).map_err(|_| "FD_STAT_FAILED")?;
     if (before.dev(), before.ino(), before.mode()) != (after.dev(), after.ino(), after.mode()) {
         return Err("FD_IDENTITY_CHANGED");
