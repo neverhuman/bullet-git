@@ -70,8 +70,7 @@ pub(super) fn run(
         native,
         profile,
         environment,
-        argv == ["--version"],
-        VERSION_TIMEOUT,
+        (argv == ["--version"]).then_some(VERSION_TIMEOUT),
     )
 }
 
@@ -82,12 +81,16 @@ fn run_inner(
     native: &mut Option<i32>,
     profile: Profile<'_>,
     environment_input: Environment,
-    version: bool,
-    timeout: Duration,
+    capture_timeout: Option<Duration>,
 ) -> Result<i32> {
     let (environment, keys) = environment(environment_input)?;
-    let streams = if version {
-        Some((record.stream(".stdout")?, record.stream(".stderr")?))
+    let version = capture_timeout.is_some();
+    let streams = if let Some(timeout) = capture_timeout {
+        Some((
+            record.stream(".stdout")?,
+            record.stream(".stderr")?,
+            timeout,
+        ))
     } else {
         None
     };
@@ -116,7 +119,7 @@ fn run_inner(
     };
     drop(inherit);
     record.append("started", json!({"pid": guard.child.id()}))?;
-    if let Some((stdout_file, stderr_file)) = streams {
+    if let Some((stdout_file, stderr_file, timeout)) = streams {
         let stdout = guard
             .child
             .stdout
@@ -162,7 +165,7 @@ fn run_inner(
         let end = stdout
             .bytes
             .iter()
-            .rposition(|byte| ![b'\r', b'\n'].contains(byte))
+            .rposition(|byte| !b"\r\n".contains(byte))
             .map_or(0, |i| i + 1);
         if *native == Some(0)
             && (stdout.bytes[..end] != *profile.version || !stderr.bytes.is_empty())

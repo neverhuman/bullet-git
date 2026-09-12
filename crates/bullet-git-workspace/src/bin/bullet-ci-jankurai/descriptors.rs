@@ -34,10 +34,10 @@ pub(super) fn read_info(reader: impl Read) -> Result<String> {
 // spawn. This binary installs no threads or asynchronous descriptor writers.
 // A caller supplying a non-CLOEXEC descriptor gets a refusal, not silent leak.
 pub(super) fn check(executable: RawFd) -> Result<()> {
-    let mut entries = fs::read_dir("/proc/self/fdinfo").map_err(io)?;
+    let entries = fs::read_dir("/proc/self/fdinfo").map_err(io)?;
     let mut seen = BTreeSet::new();
     let mut found_executable = false;
-    while let Some(entry) = entries.next() {
+    for entry in entries {
         let entry = entry.map_err(io)?;
         let name = entry
             .file_name()

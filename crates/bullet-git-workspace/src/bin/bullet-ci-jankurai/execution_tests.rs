@@ -20,7 +20,7 @@ fn actual_version_and_retained_raw_output() {
     let end = expected
         .stdout
         .iter()
-        .rposition(|b| ![b'\r', b'\n'].contains(b))
+        .rposition(|b| !b"\r\n".contains(b))
         .unwrap()
         + 1;
     let profile = Profile {
@@ -211,8 +211,7 @@ fn actual_version_timeout_retains_start_and_returns_without_unbounded_wait() {
         &mut native,
         fixture.profile(),
         environment,
-        true,
-        Duration::from_millis(150),
+        Some(Duration::from_millis(150)),
     );
     assert_eq!(result.unwrap_err(), "VERSION_TIMEOUT");
     assert!(start.elapsed() < Duration::from_secs(6));
@@ -233,8 +232,7 @@ fn actual_oversized_version_is_bounded_and_preserved() {
         &mut native,
         fixture.profile(),
         environment,
-        true,
-        Duration::from_secs(3),
+        Some(Duration::from_secs(3)),
     );
     assert_eq!(result.unwrap_err(), "VERSION_OUTPUT_LIMIT");
     assert!(fixture.root.join("child-start.json").exists());
@@ -294,8 +292,8 @@ fn fixture_child() {
     };
     let marker = std::env::var_os("BULLET_CI_MARKER").expect("child marker path");
     let mut inherited = Vec::new();
-    let mut entries = fs::read_dir("/proc/self/fdinfo").unwrap();
-    while let Some(entry) = entries.next() {
+    let entries = fs::read_dir("/proc/self/fdinfo").unwrap();
+    for entry in entries {
         let entry = entry.unwrap();
         let fd: i32 = entry.file_name().to_str().unwrap().parse().unwrap();
         let flags = descriptors::flags(&fs::read_to_string(entry.path()).unwrap()).unwrap();
