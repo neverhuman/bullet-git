@@ -40,7 +40,7 @@ run_partition() {
   }
   log "$lane partition: $count cases"
   set +e
-  cargo nextest run --locked --workspace --profile "$profile" -E "$filter"
+  python3 "$REPO_ROOT/ops/ci/runner-fds.py" cargo nextest run --locked --workspace --profile "$profile" -E "$filter"
   status=$?
   set -e
   if [[ -s "$source_report" ]]; then
